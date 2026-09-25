@@ -5,8 +5,11 @@
 
 ``fixtures/so_allocator_cases.json`` is the shared case set: inputs written by hand, every
 ``expected`` produced by executing the JavaScript (``fixtures/gen_so_allocator_cases.mjs``).
-The same file is meant to be replayed by erp-functions, so a rule changed in one copy and not
-the other fails here. Regenerate after changing the JavaScript:
+erp-functions replays a byte-identical copy (test/fixtures/so_allocator_cases.json, spec
+test/soAllocatorCases.spec.js, which also pins the JS allocator's git blobs), so a rule changed in
+one copy and not the other fails there or here. With ERP_FUNCTIONS set to an erp-functions
+checkout, TestSharedCasesFile also checks the two copies are byte-identical. Regenerate after
+changing the JavaScript (then copy the same file to erp-functions):
 
     ERP_FUNCTIONS=<erp-functions checkout> node fuelbuddy_crm/tests/fixtures/gen_so_allocator_cases.mjs \\
         > fuelbuddy_crm/tests/fixtures/so_allocator_cases.json
@@ -16,12 +19,14 @@ app directory), and it also runs under ``bench run-tests``.
 """
 
 import json
+import os
 import pathlib
 import unittest
 
 from fuelbuddy_crm import so_allocator
 
-CASES = json.loads((pathlib.Path(__file__).parent / "fixtures" / "so_allocator_cases.json").read_text())
+CASES_FILE = pathlib.Path(__file__).parent / "fixtures" / "so_allocator_cases.json"
+CASES = json.loads(CASES_FILE.read_text())
 
 
 def _project(line):
@@ -125,3 +130,19 @@ class TestSoAllocatorBehaviour(unittest.TestCase):
 		self.assertEqual(so_allocator._number("abc", 1), 1)
 		self.assertEqual(so_allocator._number(0, 1), 1)
 		self.assertEqual(so_allocator._number(True, 0), 1)
+
+
+class TestSharedCasesFile(unittest.TestCase):
+	"""The two copies of the case file must be the same bytes (skipped without ERP_FUNCTIONS)."""
+
+	def test_identical_to_the_erp_functions_copy(self):
+		root = os.environ.get("ERP_FUNCTIONS")
+		if not root:
+			self.skipTest("set ERP_FUNCTIONS to an erp-functions checkout to compare the case files")
+		theirs = pathlib.Path(root) / "test" / "fixtures" / "so_allocator_cases.json"
+		self.assertTrue(theirs.is_file(), f"{theirs} is missing")
+		self.assertEqual(
+			CASES_FILE.read_bytes(),
+			theirs.read_bytes(),
+			"so_allocator_cases.json differs from erp-functions' copy: regenerate once, copy to both",
+		)
