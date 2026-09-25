@@ -1,0 +1,1242 @@
+{
+	"_meta": {
+		"purpose": "Shared cases for the SO allocator. erp-functions (JS) is the source; fuelbuddy_crm/so_allocator.py (Python) must reproduce every expected value.",
+		"generated_by": "_shared/gen_so_allocator_cases.mjs (node v26.8.1)",
+		"erp_functions_commit": "14fbfac05782bc46906d0e2c958902d459ecf03b",
+		"source_blobs": {
+			"src/erp/allocateSalesOrders.js": "c56fd96bd996ea833c52ac8234efac792b2c1d5a",
+			"src/erp/reconcileDeliveryNoteLines.js": "9001ee5ba061b3361a8b8bb6bae6bde2c5ee11b3",
+			"src/erp/createDeliveryNote.js": "b34af55235df1afb027bd3819ede70fbc9e8c22b",
+			"src/lib/utils/deliveryNote.util.js": "2426cadea5a235eb54d75b1dba3b20c803188e22"
+		},
+		"reconcile_line_projection": [
+			"against_sales_order",
+			"so_detail",
+			"qty",
+			"uom",
+			"conversion_factor"
+		]
+	},
+	"EPSILON": 1e-9,
+	"buildSalesOrderQuery": [
+		{
+			"name": "customer, billing address and posting date",
+			"args": [
+				"CUST-00042",
+				"CUST-00042-Billing",
+				"2026-08-15"
+			],
+			"expected": {
+				"filters": [
+					[
+						"customer",
+						"=",
+						"CUST-00042"
+					],
+					[
+						"customer_address",
+						"=",
+						"CUST-00042-Billing"
+					],
+					[
+						"docstatus",
+						"=",
+						1
+					],
+					[
+						"transaction_date",
+						"<=",
+						"2026-08-15"
+					],
+					[
+						"delivery_date",
+						">=",
+						"2026-08-15"
+					]
+				],
+				"fields": [
+					"name"
+				],
+				"order_by": "creation asc",
+				"limit": 0
+			}
+		},
+		{
+			"name": "first of the month",
+			"args": [
+				"Acme Logistics LLC",
+				"Acme Logistics LLC-Billing-1",
+				"2026-10-01"
+			],
+			"expected": {
+				"filters": [
+					[
+						"customer",
+						"=",
+						"Acme Logistics LLC"
+					],
+					[
+						"customer_address",
+						"=",
+						"Acme Logistics LLC-Billing-1"
+					],
+					[
+						"docstatus",
+						"=",
+						1
+					],
+					[
+						"transaction_date",
+						"<=",
+						"2026-10-01"
+					],
+					[
+						"delivery_date",
+						">=",
+						"2026-10-01"
+					]
+				],
+				"fields": [
+					"name"
+				],
+				"order_by": "creation asc",
+				"limit": 0
+			}
+		}
+	],
+	"remainingLitres": [
+		{
+			"name": "litre line",
+			"soItem": {
+				"qty": 10000,
+				"delivered_qty": 2500,
+				"custom_delivery_note_qty_in_draft": 1000,
+				"returned_qty": 0,
+				"conversion_factor": 1
+			},
+			"expected": 6500
+		},
+		{
+			"name": "imperial gallon line converts to litres",
+			"soItem": {
+				"qty": 1000,
+				"delivered_qty": 200,
+				"custom_delivery_note_qty_in_draft": 50.5,
+				"returned_qty": 10,
+				"conversion_factor": 4.546
+			},
+			"expected": 3452.6870000000004
+		},
+		{
+			"name": "missing bookkeeping fields count as zero",
+			"soItem": {
+				"qty": 500
+			},
+			"expected": 500
+		},
+		{
+			"name": "zero conversion factor falls back to 1",
+			"soItem": {
+				"qty": 300,
+				"delivered_qty": 100,
+				"conversion_factor": 0
+			},
+			"expected": 200
+		},
+		{
+			"name": "numeric strings, blanks and nulls",
+			"soItem": {
+				"qty": "1200.5",
+				"delivered_qty": "",
+				"custom_delivery_note_qty_in_draft": null,
+				"returned_qty": "3",
+				"conversion_factor": "4.546"
+			},
+			"expected": 5471.111
+		},
+		{
+			"name": "over-subscribed line is negative",
+			"soItem": {
+				"qty": 100,
+				"delivered_qty": 80,
+				"custom_delivery_note_qty_in_draft": 40,
+				"conversion_factor": 1
+			},
+			"expected": -20
+		},
+		{
+			"name": "unparseable values count as zero / factor 1",
+			"soItem": {
+				"qty": "abc",
+				"delivered_qty": "x",
+				"conversion_factor": "IG"
+			},
+			"expected": 0
+		},
+		{
+			"name": "fractional litres",
+			"soItem": {
+				"qty": 5000.123,
+				"delivered_qty": 1234.567,
+				"custom_delivery_note_qty_in_draft": 0.001,
+				"returned_qty": 0.5,
+				"conversion_factor": 1
+			},
+			"expected": 3766.0549999999994
+		}
+	],
+	"allocate": [
+		{
+			"name": "fits in the first line",
+			"dispensedLitres": 800,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-A",
+						"so_detail": "soi-a",
+						"allocatedLitres": 800
+					}
+				],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "spans two lines FIFO",
+			"dispensedLitres": 1500,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 300,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-A",
+						"so_detail": "soi-a",
+						"allocatedLitres": 700
+					},
+					{
+						"so": "SO-B",
+						"so_detail": "soi-b",
+						"allocatedLitres": 800
+					}
+				],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "skips an exhausted line",
+			"dispensedLitres": 400,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 1200,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-C"
+					},
+					"soItem": {
+						"name": "soi-c",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-C",
+						"so_detail": "soi-c",
+						"allocatedLitres": 400
+					}
+				],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "overflow leaves leftover",
+			"dispensedLitres": 2600,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-A",
+						"so_detail": "soi-a",
+						"allocatedLitres": 1000
+					},
+					{
+						"so": "SO-B",
+						"so_detail": "soi-b",
+						"allocatedLitres": 1000
+					}
+				],
+				"leftover": 600
+			}
+		},
+		{
+			"name": "imperial gallon line capacity in litres",
+			"dispensedLitres": 5000,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-IG"
+					},
+					"soItem": {
+						"name": "soi-ig",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "IG",
+						"conversion_factor": 4.546,
+						"rate": 15.9,
+						"price_list_rate": 15.9,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 100,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-L"
+					},
+					"soItem": {
+						"name": "soi-l",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 10000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-IG",
+						"so_detail": "soi-ig",
+						"allocatedLitres": 4091.4
+					},
+					{
+						"so": "SO-L",
+						"so_detail": "soi-l",
+						"allocatedLitres": 908.5999999999999
+					}
+				],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "nothing to allocate",
+			"dispensedLitres": 0,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "dust leftover rounds to zero",
+			"dispensedLitres": 1000.0000000001,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-A",
+						"so_detail": "soi-a",
+						"allocatedLitres": 1000
+					}
+				],
+				"leftover": 0
+			}
+		},
+		{
+			"name": "no candidates",
+			"dispensedLitres": 50,
+			"candidates": [],
+			"expected": {
+				"allocations": [],
+				"leftover": 50
+			}
+		}
+	],
+	"reconcileDeliveryNoteLines": [
+		{
+			"name": "unchanged total",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1000,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": false,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1000,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "reduction inside the last line",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 600,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				},
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-B",
+					"so_detail": "soi-b",
+					"qty": 400,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 850,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 600,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-B",
+						"so_detail": "soi-b",
+						"qty": 250,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "reduction spans lines, emptied line dropped",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 600,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				},
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-B",
+					"so_detail": "soi-b",
+					"qty": 400,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 450,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 450,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "reduction to zero is refused",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 600,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				},
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-B",
+					"so_detail": "soi-b",
+					"qty": 400,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 0,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": false,
+				"error": "REDUCTION_TO_ZERO_QTY",
+				"leftover": null,
+				"lines": null
+			}
+		},
+		{
+			"name": "imperial gallon last line trimmed in its own uom",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 500,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				},
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-IG",
+					"so_detail": "soi-ig",
+					"qty": 100,
+					"uom": "IG",
+					"conversion_factor": 4.546,
+					"rate": 15.9,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 800,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 500,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-IG",
+						"so_detail": "soi-ig",
+						"qty": 65.99208095028597,
+						"uom": "IG",
+						"conversion_factor": 4.546
+					}
+				]
+			}
+		},
+		{
+			"name": "increase grows the last line within its SO headroom",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1300,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 5000,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1300,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "increase spills onto the next SO",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1800,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1500,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 2000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1500,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-B",
+						"so_detail": "soi-b",
+						"qty": 300,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "increase past every SO leaves leftover",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 2000,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1200,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 300,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 500,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1200,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-B",
+						"so_detail": "soi-b",
+						"qty": 300,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "increase skips a full SO",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1100,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1000,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-B",
+						"so_detail": "soi-b",
+						"qty": 100,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "imperial gallon last line grows in gallons, spills onto a litre SO",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-IG",
+					"so_detail": "soi-ig",
+					"qty": 100,
+					"uom": "IG",
+					"conversion_factor": 4.546,
+					"rate": 15.9,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1000,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-IG"
+					},
+					"soItem": {
+						"name": "soi-ig",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "IG",
+						"conversion_factor": 4.546,
+						"rate": 15.9,
+						"price_list_rate": 15.9,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 150,
+						"delivered_qty": 100,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-L"
+					},
+					"soItem": {
+						"name": "soi-l",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 10000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-IG",
+						"so_detail": "soi-ig",
+						"qty": 150,
+						"uom": "IG",
+						"conversion_factor": 4.546
+					},
+					{
+						"against_sales_order": "SO-L",
+						"so_detail": "soi-l",
+						"qty": 318.09999999999997,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "spill onto an imperial gallon SO",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 1000,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1454.6,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 1000,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				},
+				{
+					"so": {
+						"name": "SO-IG"
+					},
+					"soItem": {
+						"name": "soi-ig",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "IG",
+						"conversion_factor": 4.546,
+						"rate": 15.9,
+						"price_list_rate": 15.9,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 500,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 1000,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-IG",
+						"so_detail": "soi-ig",
+						"qty": 99.99999999999997,
+						"uom": "IG",
+						"conversion_factor": 4.546
+					}
+				]
+			}
+		},
+		{
+			"name": "no lines",
+			"existingLines": [],
+			"newQtyLitres": 10,
+			"deltaCandidates": [],
+			"expected": {
+				"changed": false,
+				"error": "NO_EXISTING_LINES",
+				"leftover": null,
+				"lines": null
+			}
+		}
+	]
+}
