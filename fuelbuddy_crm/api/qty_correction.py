@@ -36,7 +36,10 @@ after it (``DEADLINE``).
 
 Drain serialisation: while the back-dated drain exists, the method holds its run key
 (``fb_drain:run:active``, fuelbuddy_dubai) for the whole amend — ``SET NX`` with a TTL above the
-longest timeout layer, released compare-and-delete. Held by a drain: ``DRAIN_ACTIVE``.
+longest timeout layer, released compare-and-delete. Held by a drain: ``DRAIN_ACTIVE``. The run-key
+helpers are imported inside the method, not at module level: deploy fuelbuddy_dubai (with
+acquire_run_key / release_run_key) before fuelbuddy_crm; until then only the amend itself fails
+(an infrastructure error, which erp-functions answers as TRANSPORT), never a Delivery Note insert.
 
     NOT_LIVE_DN, SO_CLOSED, INVOICED, PERIOD_CLOSED, DEADLINE, SO_HEADROOM, ERP_VALIDATION  final
     DRAIN_ACTIVE, LOCK_RETRY (timestamp mismatch, lock wait, deadlock)                      retry
@@ -58,13 +61,12 @@ from erpnext.accounts.doctype.accounting_period.accounting_period import (
 )
 from frappe import _
 from frappe.utils import flt, get_system_timezone, strip_html
-from fuelbuddy_dubai.api.shadow_bin import acquire_run_key, release_run_key
 
 from fuelbuddy_crm import so_allocator
 from fuelbuddy_crm.dn_invoice_link import LINK_FIELD, QTY_FIELD, covering_invoices, window_invoices
 from fuelbuddy_crm.dn_validation import so_headroom_shortfalls
+from fuelbuddy_crm.dn_versioning import QC_IDEMPOTENCY_KEY_FIELD as KEY_FIELD
 
-KEY_FIELD = "custom_qc_idempotency_key"
 LOG_DOCTYPE = "DN Amend Log"
 
 AMENDED = "AMENDED"
@@ -115,6 +117,9 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 	if _db_now() >= cutoff:
 		return _refused(_deadline(cutoff))
 
+	# Imported here, not at module level: see "Drain serialisation" in the module docstring.
+	from fuelbuddy_dubai.api.shadow_bin import acquire_run_key, release_run_key
+
 	holder = f"qc-amend:{key}:{frappe.generate_hash(length=8)}"
 	if not acquire_run_key(holder, RUN_KEY_TTL_S):
 		# Held by a drain, or by another amend: amends run one at a time, like the drain batches.
@@ -135,6 +140,14 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 		return result
 	except Exception as exc:
 		frappe.db.rollback()
+		if isinstance(exc, frappe.DuplicateEntryError | frappe.UniqueValidationError):
+			# Only a committed log row for this episode makes a unique clash harmless: the
+			# retry-safe answer is the logged result. Anything else is structural (another DN
+			# already carries this key, a unique custom_invoiced_item_id, the amendment name) and
+			# retrying cannot fix it.
+			logged = _read_log(key)
+			if logged:
+				return _logged(logged)
 		refusal = _as_refusal(exc)
 		if refusal is None:
 			raise  # infrastructure: surfaces as an HTTP error, which erp-functions retries
@@ -507,15 +520,6 @@ def _db_now():
 	return frappe.db.sql("select utc_timestamp(6)")[0][0]
 
 
-# ---- hooks ---------------------------------------------------------------------------------------
-def drop_copied_idempotency_key(doc, method=None):
-	"""Delivery Note before_insert: only amend_delivery_note may put an episode key on a new
-	Delivery Note. ERPNext's Amend copies no_copy fields too, so a UI amendment of a corrected
-	Delivery Note would otherwise inherit its key and fail the unique index."""
-	if doc.get(KEY_FIELD) and doc.flags.get("qc_idempotency_key") != doc.get(KEY_FIELD):
-		doc.set(KEY_FIELD, None)
-
-
 # ---- helpers -------------------------------------------------------------------------------------
 def _read_log(key, for_update=False):
 	rows = frappe.db.sql(
@@ -571,16 +575,13 @@ def _as_refusal(exc):
 		return exc
 	if isinstance(exc, ClosedAccountingPeriod):
 		return Refusal("PERIOD_CLOSED", _message(exc))
-	if isinstance(
-		exc,
-		frappe.TimestampMismatchError
-		| frappe.QueryDeadlockError
-		| frappe.QueryTimeoutError
-		# a concurrent call for the same episode committed first; the retry reads its log
-		| frappe.DuplicateEntryError
-		| frappe.UniqueValidationError,
-	):
+	if isinstance(exc, frappe.TimestampMismatchError | frappe.QueryDeadlockError | frappe.QueryTimeoutError):
 		return Refusal("LOCK_RETRY", _message(exc))
+	if isinstance(exc, frappe.DuplicateEntryError | frappe.UniqueValidationError):
+		# amend_delivery_note already answered a clash with this episode's own committed log.
+		# The run key, the DN lock and the log gap lock serialise amends, so what is left is a
+		# structural clash: not retryable.
+		return Refusal("ERP_VALIDATION", _message(exc))
 	if _is_lock_error(exc):
 		return Refusal("LOCK_RETRY", _message(exc))
 	if isinstance(exc, frappe.ValidationError | frappe.PermissionError):

@@ -345,10 +345,11 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
         # drop_copied_idempotency_key: ERPNext's Amend copies no_copy fields, so a UI amendment of a
-        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266).
+        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266). It
+        # lives in dn_versioning, not api.qty_correction, so no DN insert depends on fuelbuddy_dubai.
         "before_insert": [
             "fuelbuddy_crm.dn_versioning.set_amended_version",
-            "fuelbuddy_crm.api.qty_correction.drop_copied_idempotency_key",
+            "fuelbuddy_crm.dn_versioning.drop_copied_idempotency_key",
         ],
         # Keep Sales Order Item.custom_delivery_note_qty_in_draft (which the allocator
         # subtracts from the SO headroom) in step with the live draft DNs -- including

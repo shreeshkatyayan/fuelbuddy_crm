@@ -492,11 +492,34 @@ class TestAmendErrorMapping(QtyCorrectionTestCase):
 			frappe.TimestampMismatchError("modified since"),
 			frappe.QueryDeadlockError("deadlock"),
 			frappe.QueryTimeoutError("lock wait timeout"),
-			frappe.DuplicateEntryError("DN Amend Log", "k"),
 		):
 			with self.subTest(type(exc).__name__):
 				self.assertRefused(self.amend_raising(exc), "LOCK_RETRY", retryable=True)
 				self.assertRunKeyFree()
+
+	def test_unique_clash_without_a_log_is_erp_validation_not_a_retry(self):
+		# Amends are serialised (run key, DN lock, log gap lock), so a unique clash that did not
+		# come from this episode's own committed log is structural: retrying cannot fix it.
+		for exc in (
+			frappe.DuplicateEntryError("Delivery Note", "MAT-DN-2026-00001-1"),
+			frappe.UniqueValidationError("custom_qc_idempotency_key already exists"),
+		):
+			with self.subTest(type(exc).__name__):
+				r = self.amend_raising(exc)
+				self.assertRefused(r, "ERP_VALIDATION")
+				self.assertTrue(r["message"])
+				self.assertRunKeyFree()
+
+	def test_unique_clash_answered_by_this_episodes_committed_log(self):
+		logged = frappe._dict(
+			result="AMENDED", new_delivery_note="MAT-DN-X-1", custom_version=2, grand_total=123.4
+		)
+		# the first read (before the amend) finds nothing; after the clash and rollback it does
+		with patch.object(qty_correction, "_read_log", side_effect=[None, logged]):
+			r = self.amend_raising(frappe.DuplicateEntryError("DN Amend Log", self.key))
+		self.assertOk(r, "AMENDED")
+		self.assertEqual((r["new_delivery_note"], r["custom_version"]), ("MAT-DN-X-1", 2))
+		self.assertRunKeyFree()
 
 	def test_other_validation_errors_are_erp_validation_with_the_message(self):
 		r = self.amend_raising(frappe.ValidationError("Item FB/FL/00001 is disabled"))
@@ -693,3 +716,53 @@ class TestSharedChecks(QtyCorrectionTestCase):
 		dn.reload()
 		dn.cancel()
 		self.assertIsNone(frappe.db.get_value("Delivery Note", dn.name, "custom_sales_invoice"))
+
+
+class TestDeliveryNoteHookIsolation(FrappeTestCase):
+	"""Every Delivery Note insert runs drop_copied_idempotency_key. It must not depend on
+	fuelbuddy_dubai's run-key helpers, or a bench with crm deployed before the dubai run-key
+	change would fail every DN insert (fresh punches and UI amends included) on import."""
+
+	def test_hook_is_registered_from_dn_versioning(self):
+		before_insert = frappe.get_hooks("doc_events").get("Delivery Note", {}).get("before_insert", [])
+		self.assertIn("fuelbuddy_crm.dn_versioning.drop_copied_idempotency_key", before_insert)
+		self.assertNotIn("fuelbuddy_crm.api.qty_correction.drop_copied_idempotency_key", before_insert)
+
+	def test_modules_import_without_the_dubai_run_key(self):
+		import importlib
+		import sys
+
+		saved = {
+			m: sys.modules.pop(m)
+			for m in ("fuelbuddy_crm.dn_versioning", "fuelbuddy_crm.api.qty_correction")
+			if m in sys.modules
+		}
+		try:
+			with patch.dict(sys.modules, {"fuelbuddy_dubai.api.shadow_bin": None}):
+				versioning = importlib.import_module("fuelbuddy_crm.dn_versioning")
+				self.assertTrue(callable(versioning.drop_copied_idempotency_key))
+				qc = importlib.import_module("fuelbuddy_crm.api.qty_correction")
+				self.assertTrue(callable(qc.amend_delivery_note))
+		finally:
+			for m in ("fuelbuddy_crm.dn_versioning", "fuelbuddy_crm.api.qty_correction"):
+				sys.modules.pop(m, None)
+			sys.modules.update(saved)
+
+	def test_hook_clears_a_copied_key_and_keeps_the_amend_s_own(self):
+		from fuelbuddy_crm.dn_versioning import drop_copied_idempotency_key
+
+		class Doc(dict):
+			def __init__(self, key, flag=None):
+				super().__init__(custom_qc_idempotency_key=key)
+				self.flags = frappe._dict(qc_idempotency_key=flag)
+
+			def set(self, field, value):
+				self[field] = value
+
+		copied = Doc("ep-1")  # a UI amendment copied the corrected DN's key
+		drop_copied_idempotency_key(copied)
+		self.assertIsNone(copied["custom_qc_idempotency_key"])
+
+		own = Doc("ep-2", flag="ep-2")  # amend_delivery_note's own amendment
+		drop_copied_idempotency_key(own)
+		self.assertEqual(own["custom_qc_idempotency_key"], "ep-2")
