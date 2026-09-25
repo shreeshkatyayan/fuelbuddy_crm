@@ -117,7 +117,15 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 
 	holder = f"qc-amend:{key}:{frappe.generate_hash(length=8)}"
 	if not acquire_run_key(holder, RUN_KEY_TTL_S):
-		return _refused(Refusal("DRAIN_ACTIVE", _("A Delivery Note drain holds the run key; retry later.")))
+		# Held by a drain, or by another amend: amends run one at a time, like the drain batches.
+		return _refused(
+			Refusal(
+				"DRAIN_ACTIVE",
+				_(
+					"The drain run key is held (a Delivery Note drain or another amend is running); retry later."
+				),
+			)
+		)
 	try:
 		# Start a fresh transaction, so every read below sees what was committed before we held
 		# the run key and took the Delivery Note lock, not a snapshot from earlier in the request.
