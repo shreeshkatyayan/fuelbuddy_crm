@@ -8,7 +8,9 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# required_apps = []
+# fuelbuddy_dubai owns the back-dated DN drain and its run key, which the quantity-correction
+# amend (fuelbuddy_crm.api.qty_correction) holds while it changes a Delivery Note (IDEV-3266).
+required_apps = ["fuelbuddy_dubai"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -342,7 +344,12 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.enforce_single_active_dn",
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
-        "before_insert": "fuelbuddy_crm.dn_versioning.set_amended_version",
+        # drop_copied_idempotency_key: ERPNext's Amend copies no_copy fields, so a UI amendment of a
+        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266).
+        "before_insert": [
+            "fuelbuddy_crm.dn_versioning.set_amended_version",
+            "fuelbuddy_crm.api.qty_correction.drop_copied_idempotency_key",
+        ],
         # Keep Sales Order Item.custom_delivery_note_qty_in_draft (which the allocator
         # subtracts from the SO headroom) in step with the live draft DNs -- including
         # RELEASING it on cancel/delete, which the old Server Script never did.
