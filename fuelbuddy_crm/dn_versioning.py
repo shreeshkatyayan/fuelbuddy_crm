@@ -33,10 +33,8 @@ def set_amended_version(doc, method=None):
 
 # ---- quantity-correction idempotency key (IDEV-3266) ---------------------------------------------
 # The episode key amend_delivery_note (fuelbuddy_crm.api.qty_correction) puts on the live Delivery
-# Note it produces. Lives here, not in api/qty_correction, because the before_insert hook below
-# runs on EVERY Delivery Note insert and must not depend on fuelbuddy_dubai: api/qty_correction
-# uses the drain run key from fuelbuddy_dubai, and a bench where that symbol is missing (crm
-# deployed before the dubai run-key change) would otherwise fail every DN insert on import.
+# Note it produces. Lives here, beside set_amended_version, because the hook below is a Delivery
+# Note before_insert hook like it; api/qty_correction imports the field name from here.
 QC_IDEMPOTENCY_KEY_FIELD = "custom_qc_idempotency_key"
 
 

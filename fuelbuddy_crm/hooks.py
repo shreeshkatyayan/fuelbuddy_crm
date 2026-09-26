@@ -8,9 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# fuelbuddy_dubai owns the back-dated DN drain and its run key, which the quantity-correction
-# amend (fuelbuddy_crm.api.qty_correction) holds while it changes a Delivery Note (IDEV-3266).
-required_apps = ["fuelbuddy_dubai"]
+# required_apps = []
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -345,8 +343,7 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
         # drop_copied_idempotency_key: ERPNext's Amend copies no_copy fields, so a UI amendment of a
-        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266). It
-        # lives in dn_versioning, not api.qty_correction, so no DN insert depends on fuelbuddy_dubai.
+        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266).
         "before_insert": [
             "fuelbuddy_crm.dn_versioning.set_amended_version",
             "fuelbuddy_crm.dn_versioning.drop_copied_idempotency_key",

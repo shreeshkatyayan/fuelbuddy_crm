@@ -3,7 +3,7 @@
 
 """amend_delivery_note / get_amendment_plan (IDEV-3266) on a live ERPNext site.
 
-Needs erpnext + fuelbuddy_dubai + fuelbuddy_crm, a company (setup wizard done) and Redis.
+Needs erpnext + fuelbuddy_crm and a company (setup wizard done).
 Production-only schema is stood in by qc_fixtures.ensure_prod_schema. Every test gets its own
 customer, so Sales Orders never leak between tests.
 
@@ -18,7 +18,6 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import flt, getdate
-from fuelbuddy_dubai.api import shadow_bin
 
 from fuelbuddy_crm.api import qty_correction
 from fuelbuddy_crm.tests import qc_fixtures as fx
@@ -37,17 +36,10 @@ class QtyCorrectionTestCase(FrappeTestCase):
 		fx.ensure_masters()
 		# Production behaviour: a backdated submit/cancel only QUEUES its repost.
 		frappe.flags.dont_execute_stock_reposts = True
-		cls.redis = shadow_bin._raw_redis()
 
 	def setUp(self):
-		holder = self.redis.get(shadow_bin.RUN_KEY)
-		if holder:
-			self.skipTest(f"run key held by a real run on this site: {holder}")
 		self.party = fx.new_customer(self._testMethodName[5:30])
 		self.key = f"{uuid.uuid4()}-{int(time.time() * 1000)}"
-
-	def tearDown(self):
-		self.redis.delete(shadow_bin.RUN_KEY)
 
 	# ---- helpers ------------------------------------------------------------------------------
 	def amend(self, dn, target, key=None, not_after=FUTURE):
@@ -71,9 +63,6 @@ class QtyCorrectionTestCase(FrappeTestCase):
 		self.assertIsNone(result["code"])
 		self.assertFalse(result["retryable"])
 		self.assertEqual(result["result"], expected, result)
-
-	def assertRunKeyFree(self):
-		self.assertIsNone(self.redis.get(shadow_bin.RUN_KEY), "the amend left the run key behind")
 
 	def log(self, key=None):
 		name = frappe.db.exists("DN Amend Log", {"idempotency_key": key or self.key})
@@ -142,7 +131,6 @@ class TestAmendDraft(QtyCorrectionTestCase):
 			(log.result, log.delivery_note, log.new_delivery_note, log.target_qty),
 			("DRAFT_UPDATED", dn.name, dn.name, 800),
 		)
-		self.assertRunKeyFree()
 
 	def test_draft_increase_within_headroom_grows_the_line(self):
 		so = self.so(10000)
@@ -177,7 +165,6 @@ class TestAmendDraft(QtyCorrectionTestCase):
 		self.assertFalse(frappe.db.exists("Delivery Note", dn.name))
 		self.assertEqual(self.soi(so, "custom_delivery_note_qty_in_draft"), 0)
 		self.assertEqual(self.log().result, "DRAFT_DELETED")
-		self.assertRunKeyFree()
 
 	def test_draft_replaces_a_previous_episodes_key(self):
 		so = self.so(10000)
@@ -223,7 +210,6 @@ class TestAmendSubmitted(QtyCorrectionTestCase):
 		self.assertEqual(self.soi(so, "delivered_qty"), 750)
 		log = self.log()
 		self.assertEqual((log.result, log.new_delivery_note, log.custom_version), ("AMENDED", new.name, 2))
-		self.assertRunKeyFree()
 
 	def test_amending_an_amendment_increments_the_version_again(self):
 		so = self.so(10000)
@@ -342,13 +328,11 @@ class TestAmendIdempotency(QtyCorrectionTestCase):
 		self.assertSameResult(first, self.amend(dn.name, 700))
 		self.assertEqual(frappe.db.get_value("Delivery Note Item", {"parent": dn.name}, "qty"), 700)
 
-	def test_retry_is_answered_while_a_drain_runs_and_after_the_cut_off(self):
+	def test_retry_is_answered_from_the_log_after_the_cut_off(self):
 		so = self.so(10000)
 		dn = self.dn([(so, 1000)], submit=True)
 		first = self.amend(dn.name, 750)
-		self.assertTrue(shadow_bin.acquire_run_key("fb-drain-test", 60))
 		self.assertSameResult(first, self.amend(dn.name, 750, not_after=PAST))
-		self.assertEqual(self.redis.get(shadow_bin.RUN_KEY), "fb-drain-test")
 
 
 class TestAmendRefusals(QtyCorrectionTestCase):
@@ -356,7 +340,6 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 		self.assertEqual(frappe.db.get_value("Delivery Note", dn.name, "docstatus"), dn.docstatus)
 		self.assertEqual(self.amendments_of(dn.name), [])
 		self.assertIsNone(self.log(), "a refusal must not write the amend log")
-		self.assertRunKeyFree()
 
 	def test_not_live_dn_for_a_cancelled_or_missing_dn(self):
 		so = self.so(10000)
@@ -365,7 +348,6 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 		self.assertRefused(self.amend(dn.name, 500), "NOT_LIVE_DN")
 		self.assertRefused(self.amend("FB/DN/NO-SUCH-DN", 500), "NOT_LIVE_DN")
 		self.assertIsNone(self.log())
-		self.assertRunKeyFree()
 
 	def test_so_closed(self):
 		for status in ("Closed", "On Hold"):
@@ -453,18 +435,6 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 		self.assertUntouched(dn)
 		self.assertEqual(self.soi(so, "delivered_qty"), 600)
 
-	def test_drain_active_when_the_run_key_is_held(self):
-		so = self.so(10000)
-		dn = self.dn([(so, 1000)], submit=True)
-		self.assertTrue(shadow_bin.acquire_run_key("fb-drain-abc123", 60))
-		r = self.amend(dn.name, 500)
-		self.assertRefused(r, "DRAIN_ACTIVE", retryable=True)
-		self.assertEqual(
-			self.redis.get(shadow_bin.RUN_KEY), "fb-drain-abc123", "must not touch the drain's key"
-		)
-		self.redis.delete(shadow_bin.RUN_KEY)
-		self.assertUntouched(dn)
-
 	def test_invalid_input_is_erp_validation(self):
 		so = self.so(10000)
 		dn = self.dn([(so, 1000)])
@@ -477,7 +447,7 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 
 
 class TestAmendErrorMapping(QtyCorrectionTestCase):
-	"""Exceptions raised inside the transaction map to codes, roll back, and free the run key."""
+	"""Exceptions raised inside the transaction map to codes and roll back."""
 
 	def setUp(self):
 		super().setUp()
@@ -495,11 +465,10 @@ class TestAmendErrorMapping(QtyCorrectionTestCase):
 		):
 			with self.subTest(type(exc).__name__):
 				self.assertRefused(self.amend_raising(exc), "LOCK_RETRY", retryable=True)
-				self.assertRunKeyFree()
 
 	def test_unique_clash_without_a_log_is_erp_validation_not_a_retry(self):
-		# Amends are serialised (run key, DN lock, log gap lock), so a unique clash that did not
-		# come from this episode's own committed log is structural: retrying cannot fix it.
+		# Amends are serialised (DN lock, log gap lock), so a unique clash that did not come from
+		# this episode's own committed log is structural: retrying cannot fix it.
 		for exc in (
 			frappe.DuplicateEntryError("Delivery Note", "MAT-DN-2026-00001-1"),
 			frappe.UniqueValidationError("custom_qc_idempotency_key already exists"),
@@ -508,7 +477,6 @@ class TestAmendErrorMapping(QtyCorrectionTestCase):
 				r = self.amend_raising(exc)
 				self.assertRefused(r, "ERP_VALIDATION")
 				self.assertTrue(r["message"])
-				self.assertRunKeyFree()
 
 	def test_unique_clash_answered_by_this_episodes_committed_log(self):
 		logged = frappe._dict(
@@ -519,26 +487,27 @@ class TestAmendErrorMapping(QtyCorrectionTestCase):
 			r = self.amend_raising(frappe.DuplicateEntryError("DN Amend Log", self.key))
 		self.assertOk(r, "AMENDED")
 		self.assertEqual((r["new_delivery_note"], r["custom_version"]), ("MAT-DN-X-1", 2))
-		self.assertRunKeyFree()
 
 	def test_other_validation_errors_are_erp_validation_with_the_message(self):
 		r = self.amend_raising(frappe.ValidationError("Item FB/FL/00001 is disabled"))
 		self.assertRefused(r, "ERP_VALIDATION")
 		self.assertEqual(r["message"], "Item FB/FL/00001 is disabled")
-		self.assertRunKeyFree()
 
 	def test_permission_error_is_erp_validation(self):
 		self.assertRefused(self.amend_raising(frappe.PermissionError("no cancel")), "ERP_VALIDATION")
 
-	def test_infrastructure_errors_propagate_and_still_free_the_run_key(self):
+	def test_infrastructure_errors_propagate_and_roll_back(self):
 		with self.assertRaises(RuntimeError):
-			self.amend_raising(RuntimeError("redis went away"))
-		self.assertRunKeyFree()
+			self.amend_raising(RuntimeError("connection reset"))
 		self.assertEqual(frappe.db.get_value("Delivery Note", self.target.name, "docstatus"), 1)
 
-	def test_run_key_is_released_after_success(self):
-		self.assertOk(self.amend(self.target.name, 500), "AMENDED")
-		self.assertRunKeyFree()
+	def test_success_is_committed(self):
+		r = self.amend(self.target.name, 500)
+		self.assertOk(r, "AMENDED")
+		frappe.db.rollback()  # nothing of the amend is left to roll back
+		self.assertEqual(frappe.db.get_value("Delivery Note", self.target.name, "docstatus"), 2)
+		self.assertEqual(frappe.db.get_value("Delivery Note", r["new_delivery_note"], "docstatus"), 1)
+		self.assertEqual(self.log().result, "AMENDED")
 
 
 class TestGetAmendmentPlan(QtyCorrectionTestCase):
@@ -672,7 +641,6 @@ class TestGetAmendmentPlan(QtyCorrectionTestCase):
 		self.plan(dn.custom_invoiced_item_id, 800)
 		self.assertEqual(frappe.db.get_value("Delivery Note", dn.name, "modified"), modified)
 		self.assertIsNone(self.log())
-		self.assertRunKeyFree()
 
 	def test_invalid_input(self):
 		p = self.plan(str(uuid.uuid4()), -1)
@@ -718,35 +686,12 @@ class TestSharedChecks(QtyCorrectionTestCase):
 		self.assertIsNone(frappe.db.get_value("Delivery Note", dn.name, "custom_sales_invoice"))
 
 
-class TestDeliveryNoteHookIsolation(FrappeTestCase):
-	"""Every Delivery Note insert runs drop_copied_idempotency_key. It must not depend on
-	fuelbuddy_dubai's run-key helpers, or a bench with crm deployed before the dubai run-key
-	change would fail every DN insert (fresh punches and UI amends included) on import."""
+class TestDropCopiedIdempotencyKey(FrappeTestCase):
+	"""Every Delivery Note insert runs dn_versioning.drop_copied_idempotency_key."""
 
 	def test_hook_is_registered_from_dn_versioning(self):
 		before_insert = frappe.get_hooks("doc_events").get("Delivery Note", {}).get("before_insert", [])
 		self.assertIn("fuelbuddy_crm.dn_versioning.drop_copied_idempotency_key", before_insert)
-		self.assertNotIn("fuelbuddy_crm.api.qty_correction.drop_copied_idempotency_key", before_insert)
-
-	def test_modules_import_without_the_dubai_run_key(self):
-		import importlib
-		import sys
-
-		saved = {
-			m: sys.modules.pop(m)
-			for m in ("fuelbuddy_crm.dn_versioning", "fuelbuddy_crm.api.qty_correction")
-			if m in sys.modules
-		}
-		try:
-			with patch.dict(sys.modules, {"fuelbuddy_dubai.api.shadow_bin": None}):
-				versioning = importlib.import_module("fuelbuddy_crm.dn_versioning")
-				self.assertTrue(callable(versioning.drop_copied_idempotency_key))
-				qc = importlib.import_module("fuelbuddy_crm.api.qty_correction")
-				self.assertTrue(callable(qc.amend_delivery_note))
-		finally:
-			for m in ("fuelbuddy_crm.dn_versioning", "fuelbuddy_crm.api.qty_correction"):
-				sys.modules.pop(m, None)
-			sys.modules.update(saved)
 
 	def test_hook_clears_a_copied_key_and_keeps_the_amend_s_own(self):
 		from fuelbuddy_crm.dn_versioning import drop_copied_idempotency_key

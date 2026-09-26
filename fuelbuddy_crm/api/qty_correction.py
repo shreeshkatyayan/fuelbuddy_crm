@@ -34,15 +34,8 @@ Cut-off: ``not_after`` is the ticket's ``apply_cutoff_at``. The database clock i
 it inside the transaction, again just before the commit, so a slow or retried amend cannot land
 after it (``DEADLINE``).
 
-Drain serialisation: while the back-dated drain exists, the method holds its run key
-(``fb_drain:run:active``, fuelbuddy_dubai) for the whole amend — ``SET NX`` with a TTL above the
-longest timeout layer, released compare-and-delete. Held by a drain: ``DRAIN_ACTIVE``. The run-key
-helpers are imported inside the method, not at module level: deploy fuelbuddy_dubai (with
-acquire_run_key / release_run_key) before fuelbuddy_crm; until then only the amend itself fails
-(an infrastructure error, which erp-functions answers as TRANSPORT), never a Delivery Note insert.
-
     NOT_LIVE_DN, SO_CLOSED, INVOICED, PERIOD_CLOSED, DEADLINE, SO_HEADROOM, ERP_VALIDATION  final
-    DRAIN_ACTIVE, LOCK_RETRY (timestamp mismatch, lock wait, deadlock)                      retry
+    LOCK_RETRY (timestamp mismatch, lock wait, deadlock)                                    retry
 
 ERP wallet / credit limit are out of scope (IDEV-3266): not live in ERP. If either is switched
 on, revisit — both run as validate hooks on every Delivery Note save and could refuse an amend.
@@ -74,13 +67,8 @@ CANCELLED = "CANCELLED"
 DRAFT_UPDATED = "DRAFT_UPDATED"
 DRAFT_DELETED = "DRAFT_DELETED"
 
-RETRYABLE = frozenset({"DRAIN_ACTIVE", "LOCK_RETRY"})
+RETRYABLE = frozenset({"LOCK_RETRY"})
 CLOSED_SO_STATUSES = ("Closed", "On Hold")
-
-# The run key must outlive every timeout layer above one amend (activity startToClose >
-# Hasura action 300 s > Cloud Function 300 s), so it can never expire under a running amend;
-# a worker killed mid-amend then blocks the drain for minutes, not hours.
-RUN_KEY_TTL_S = 900
 
 # A Delivery Note within this many litres of the target is "at target". Line qty is stored in
 # the line's UOM, so an Imperial Gallon line cannot hit an arbitrary litre figure exactly.
@@ -110,30 +98,17 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 	except Refusal as refusal:
 		return _refused(refusal)
 
-	# An episode ERP already applied answers from its log — during a drain or after the cut-off too.
+	# An episode ERP already applied answers from its log — after the cut-off too.
 	logged = _read_log(key)
 	if logged:
 		return _logged(logged)
 	if _db_now() >= cutoff:
 		return _refused(_deadline(cutoff))
 
-	# Imported here, not at module level: see "Drain serialisation" in the module docstring.
-	from fuelbuddy_dubai.api.shadow_bin import acquire_run_key, release_run_key
-
-	holder = f"qc-amend:{key}:{frappe.generate_hash(length=8)}"
-	if not acquire_run_key(holder, RUN_KEY_TTL_S):
-		# Held by a drain, or by another amend: amends run one at a time, like the drain batches.
-		return _refused(
-			Refusal(
-				"DRAIN_ACTIVE",
-				_(
-					"The drain run key is held (a Delivery Note drain or another amend is running); retry later."
-				),
-			)
-		)
 	try:
-		# Start a fresh transaction, so every read below sees what was committed before we held
-		# the run key and took the Delivery Note lock, not a snapshot from earlier in the request.
+		# Start a fresh transaction, so the plain reads in _amend see what was committed before we
+		# took the Delivery Note lock (say, by an amend of the same Delivery Note that held it),
+		# not the snapshot the log read and permission check above opened.
 		frappe.db.commit()
 		result = _amend(name, target, key, cutoff)
 		frappe.db.commit()
@@ -152,8 +127,6 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 		if refusal is None:
 			raise  # infrastructure: surfaces as an HTTP error, which erp-functions retries
 		return _refused(refusal)
-	finally:
-		release_run_key(holder)
 
 
 def _amend(name, target, key, cutoff):
@@ -579,8 +552,8 @@ def _as_refusal(exc):
 		return Refusal("LOCK_RETRY", _message(exc))
 	if isinstance(exc, frappe.DuplicateEntryError | frappe.UniqueValidationError):
 		# amend_delivery_note already answered a clash with this episode's own committed log.
-		# The run key, the DN lock and the log gap lock serialise amends, so what is left is a
-		# structural clash: not retryable.
+		# The DN lock and the log gap lock serialise amends of one Delivery Note and one episode,
+		# so what is left is a structural clash: not retryable.
 		return Refusal("ERP_VALIDATION", _message(exc))
 	if _is_lock_error(exc):
 		return Refusal("LOCK_RETRY", _message(exc))
