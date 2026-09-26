@@ -26,16 +26,32 @@ and ``custom_version`` is parent + 1 via dn_versioning.set_amended_version.
 
 Idempotency: the episode key goes on the resulting live Delivery Note
 (``custom_qc_idempotency_key``, unique, no_copy) and, in every branch, into a ``DN Amend Log``
-row written in the same transaction. The method locks the input Delivery Note, then reads the
-log with a locking read; a retry, or the plan, returns the logged result instead of
+row written in the same transaction; a retry, or the plan, returns the logged result instead of
 ``NOT_LIVE_DN``.
+
+Concurrency: the amend takes three locks, always in this order.
+
+    Delivery Note row       FOR UPDATE: amends of one Delivery Note take turns
+    Sales Order Item rows   FOR UPDATE, one statement, in name order: the Delivery Note's lines
+                            and, for an increase, the lines it may spill onto
+    DN Amend Log            locking read, which takes the gap lock when there is no row yet:
+                            two calls for one episode take turns, the second sees the first's log
+
+The Sales Order line lock is for amends of DIFFERENT Delivery Notes on one Sales Order line: a
+call that outlives the caller's timeout keeps running while the next one starts, and without it
+both could pass the headroom check. Every branch writes the lines it uses anyway (delivered qty,
+draft reservation); the lock takes them before any headroom read. Which lines to lock is read
+before the transaction; the locks come before its first plain read, where InnoDB (REPEATABLE
+READ) takes the transaction's snapshot, so every read after them sees what was committed before
+they were granted. If the amend ends up using a line it did not lock (the Delivery Note or its
+Sales Orders changed in between), it refuses with ``LOCK_RETRY``.
 
 Cut-off: ``not_after`` is the ticket's ``apply_cutoff_at``. The database clock is compared with
 it inside the transaction, again just before the commit, so a slow or retried amend cannot land
 after it (``DEADLINE``).
 
     NOT_LIVE_DN, SO_CLOSED, INVOICED, PERIOD_CLOSED, DEADLINE, SO_HEADROOM, ERP_VALIDATION  final
-    LOCK_RETRY (timestamp mismatch, lock wait, deadlock)                                    retry
+    LOCK_RETRY (timestamp mismatch, lock wait, deadlock, Sales Order lines changed)         retry
 
 ERP wallet / credit limit are out of scope (IDEV-3266): not live in ERP. If either is switched
 on, revisit — both run as validate hooks on every Delivery Note save and could refuse an amend.
@@ -106,11 +122,12 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 		return _refused(_deadline(cutoff))
 
 	try:
+		so_lines = _so_lines_to_lock(name, target)
 		# Start a fresh transaction, so the plain reads in _amend see what was committed before we
-		# took the Delivery Note lock (say, by an amend of the same Delivery Note that held it),
-		# not the snapshot the log read and permission check above opened.
+		# took its locks (say, by another amend that held them), not the snapshot the reads above
+		# opened.
 		frappe.db.commit()
-		result = _amend(name, target, key, cutoff)
+		result = _amend(name, target, key, cutoff, so_lines)
 		frappe.db.commit()
 		return result
 	except Exception as exc:
@@ -129,10 +146,12 @@ def amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after):
 		return _refused(refusal)
 
 
-def _amend(name, target, key, cutoff):
-	# Lock the input DN first, then the log (a locking read also takes the gap lock when there
-	# is no row yet), so two calls for one episode serialise and the second sees the first's log.
+def _amend(name, target, key, cutoff, so_lines):
+	# The input DN, then its Sales Order lines, then the log (a locking read also takes the gap
+	# lock when there is no row yet): see "Concurrency" in the module docstring. All three are
+	# locking reads, so the snapshot is taken after them, at the first plain read below.
 	frappe.db.sql("select name from `tabDelivery Note` where name = %s for update", name)
+	_lock_so_lines(so_lines)
 	logged = _read_log(key, for_update=True)
 	if logged:
 		return _logged(logged)
@@ -143,11 +162,12 @@ def _amend(name, target, key, cutoff):
 	_check_deadline(cutoff)
 
 	doc = frappe.get_doc("Delivery Note", name)
+	_check_locked({row.so_detail for row in doc.items}, so_lines)
 	_check_sales_orders_open(doc)
 	if doc.docstatus == 0:
-		result = _amend_draft(doc, target, key)
+		result = _amend_draft(doc, target, key, so_lines)
 	else:
-		result = _amend_submitted(doc, target, key)
+		result = _amend_submitted(doc, target, key, so_lines)
 
 	frappe.get_doc(
 		{
@@ -167,13 +187,34 @@ def _amend(name, target, key, cutoff):
 	return result
 
 
-def _amend_draft(doc, target, key):
+def _so_lines_to_lock(name, target):
+	"""The Sales Order Items an amend of ``name`` to ``target`` can read or change for headroom:
+	the Delivery Note's own lines and, for an increase, the lines it may spill onto. Plain reads,
+	before the amend's transaction; _check_locked refuses if the amend ends up using another."""
+	if not frappe.db.exists("Delivery Note", name):
+		return set()
+	doc = frappe.get_doc("Delivery Note", name)
+	lines = {row.so_detail for row in doc.items if row.so_detail}
+	return lines | {c["soItem"]["name"] for c in _increase_candidates(doc, target)}
+
+
+def _lock_so_lines(names):
+	"""One statement, rows in name order, so two amends never take the same lines in a different
+	order."""
+	if names:
+		frappe.db.sql(
+			"select name from `tabSales Order Item` where name in %(names)s order by name for update",
+			{"names": tuple(sorted(names))},
+		)
+
+
+def _amend_draft(doc, target, key, so_lines):
 	_check_not_invoiced(doc)
 	if _is_zero(target):
 		frappe.delete_doc("Delivery Note", doc.name)
 		return _ok(DRAFT_DELETED, _("Draft Delivery Note {0} deleted").format(doc.name))
 
-	lines = _reshape(doc, target)
+	lines = _reshape(doc, target, so_lines)
 	by_row = {line["name"]: line for line in lines if line.get("name")}
 	kept = []
 	for row in doc.items:
@@ -197,8 +238,8 @@ def _amend_draft(doc, target, key):
 	)
 
 
-def _amend_submitted(doc, target, key):
-	lines = None if _is_zero(target) else _reshape(doc, target)
+def _amend_submitted(doc, target, key, so_lines):
+	lines = None if _is_zero(target) else _reshape(doc, target, so_lines)
 	original = {row.so_detail for row in doc.items if row.so_detail}
 	added = {line["so_detail"] for line in lines or [] if line.get("so_detail")} - original
 	_check_not_invoiced(doc, added)
@@ -252,12 +293,10 @@ def _build_amendment(original, lines, key):
 	return amendment
 
 
-def _reshape(doc, target):
+def _reshape(doc, target, so_lines):
 	"""The Delivery Note's lines at ``target`` litres (so_allocator), or a Refusal."""
 	existing = [_line(row) for row in doc.items]
-	current = sum(so_allocator.line_litres(line) for line in existing)
-	candidates = _delta_candidates(doc) if target > current else []
-	result = so_allocator.reconcile_delivery_note_lines(existing, target, candidates)
+	result = so_allocator.reconcile_delivery_note_lines(existing, target, _increase_candidates(doc, target))
 	if result.get("error"):
 		raise Refusal("ERP_VALIDATION", _("Delivery Note {0}: {1}").format(doc.name, result["error"]))
 	if result["leftover"] > 0:
@@ -267,6 +306,7 @@ def _reshape(doc, target):
 				flt(result["leftover"], 3), doc.posting_date, doc.customer
 			),
 		)
+	_check_locked({line.get("so_detail") for line in result["lines"]}, so_lines)
 	return result["lines"]
 
 
@@ -291,6 +331,12 @@ def _line(row):
 		if row.get(optional) is not None:
 			line[optional] = row.get(optional)
 	return line
+
+
+def _increase_candidates(doc, target):
+	"""_delta_candidates when ``target`` is more litres than the Delivery Note has, else none."""
+	current = sum(so_allocator.line_litres(_line(row)) for row in doc.items)
+	return _delta_candidates(doc) if target > current else []
 
 
 def _delta_candidates(doc):
@@ -462,6 +508,15 @@ def _check_not_invoiced(doc, added_so_details=()):
 			_("Delivery Note {0} is covered by Sales Invoice {1}").format(
 				doc.name, ", ".join(sorted(invoices))
 			),
+		)
+
+
+def _check_locked(so_details, so_lines):
+	unlocked = sorted(so_detail for so_detail in so_details if so_detail and so_detail not in so_lines)
+	if unlocked:
+		raise Refusal(
+			"LOCK_RETRY",
+			_("Sales Order lines {0} changed while the amend took its locks").format(", ".join(unlocked)),
 		)
 
 

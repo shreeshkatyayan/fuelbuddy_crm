@@ -10,8 +10,10 @@ customer, so Sales Orders never leak between tests.
     bench --site <site> run-tests --app fuelbuddy_crm --module fuelbuddy_crm.tests.test_qty_correction
 """
 
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
 
@@ -20,6 +22,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import flt, getdate
 
 from fuelbuddy_crm.api import qty_correction
+from fuelbuddy_crm.dn_validation import so_headroom_shortfalls
 from fuelbuddy_crm.tests import qc_fixtures as fx
 
 FUTURE = "2099-01-01T05:00:00.000Z"
@@ -63,6 +66,11 @@ class QtyCorrectionTestCase(FrappeTestCase):
 		self.assertIsNone(result["code"])
 		self.assertFalse(result["retryable"])
 		self.assertEqual(result["result"], expected, result)
+
+	def assertUntouched(self, dn):
+		self.assertEqual(frappe.db.get_value("Delivery Note", dn.name, "docstatus"), dn.docstatus)
+		self.assertEqual(self.amendments_of(dn.name), [])
+		self.assertIsNone(self.log(), "a refusal must not write the amend log")
 
 	def log(self, key=None):
 		name = frappe.db.exists("DN Amend Log", {"idempotency_key": key or self.key})
@@ -336,11 +344,6 @@ class TestAmendIdempotency(QtyCorrectionTestCase):
 
 
 class TestAmendRefusals(QtyCorrectionTestCase):
-	def assertUntouched(self, dn):
-		self.assertEqual(frappe.db.get_value("Delivery Note", dn.name, "docstatus"), dn.docstatus)
-		self.assertEqual(self.amendments_of(dn.name), [])
-		self.assertIsNone(self.log(), "a refusal must not write the amend log")
-
 	def test_not_live_dn_for_a_cancelled_or_missing_dn(self):
 		so = self.so(10000)
 		dn = self.dn([(so, 1000)], submit=True)
@@ -508,6 +511,135 @@ class TestAmendErrorMapping(QtyCorrectionTestCase):
 		self.assertEqual(frappe.db.get_value("Delivery Note", self.target.name, "docstatus"), 2)
 		self.assertEqual(frappe.db.get_value("Delivery Note", r["new_delivery_note"], "docstatus"), 1)
 		self.assertEqual(self.log().result, "AMENDED")
+
+
+class TestAmendSalesOrderLineLock(QtyCorrectionTestCase):
+	"""Amends of different Delivery Notes on one Sales Order line take turns on the line. A second
+	database session stands in for the other amend; fixtures are committed so it sees them."""
+
+	def hold(self, *so_details):
+		"""A second session holding these Sales Order lines, as a concurrent amend would."""
+		other = frappe.db.create_connection()
+		self.addCleanup(other.close)  # an open transaction rolls back on close
+		other.cursor().execute(
+			"select name from `tabSales Order Item` where name in %s for update", [so_details]
+		)
+		return other
+
+	@contextmanager
+	def lock_wait(self, seconds):
+		before = frappe.db.sql("select @@session.innodb_lock_wait_timeout")[0][0]
+		frappe.db.sql("set session innodb_lock_wait_timeout = %s", seconds)
+		try:
+			yield
+		finally:
+			frappe.db.sql("set session innodb_lock_wait_timeout = %s", before)
+
+	def commit_once_waiting(self, other):
+		"""Commit ``other`` as soon as this session waits for the Sales Order line lock."""
+		me = frappe.db.sql("select connection_id()")[0][0]
+		watcher = frappe.db.create_connection()
+		self.addCleanup(watcher.close)
+
+		def run():
+			deadline = time.monotonic() + 20
+			while time.monotonic() < deadline:
+				cursor = watcher.cursor()
+				cursor.execute("select info from information_schema.processlist where id = %s", me)
+				info = (cursor.fetchone() or [None])[0] or ""
+				if "`tabSales Order Item`" in info and "for update" in info:
+					break
+				time.sleep(0.05)
+			other.commit()
+
+		thread = threading.Thread(target=run)
+		thread.start()
+		self.addCleanup(thread.join)
+		return thread
+
+	def amend_while_held(self, dn, target, held_so):
+		"""Amend while another session holds ``held_so``'s line: LOCK_RETRY, and the amend waited on
+		the line before it read any headroom (a save or submit waits on it too, but after the check)."""
+		frappe.db.commit()
+		self.hold(held_so.items[0].name)
+		with (
+			self.lock_wait(1),
+			patch.object(qty_correction, "so_headroom_shortfalls", wraps=so_headroom_shortfalls) as check,
+		):
+			r = self.amend(dn.name, target)
+		self.assertRefused(r, "LOCK_RETRY", retryable=True)
+		check.assert_not_called()
+		self.assertUntouched(dn)
+
+	def draft_qty(self, dn):
+		return frappe.db.get_value("Delivery Note Item", {"parent": dn.name}, "qty")
+
+	def test_lines_to_lock_are_the_dn_s_own_plus_spill_over_lines_for_an_increase(self):
+		so_a = self.so(1000)
+		so_b = self.so(5000)
+		dn = self.dn([(so_a, 900)], submit=True)
+		own, spill = so_a.items[0].name, so_b.items[0].name
+		self.assertEqual(qty_correction._so_lines_to_lock(dn.name, 800), {own})
+		self.assertEqual(qty_correction._so_lines_to_lock(dn.name, 0), {own})
+		self.assertEqual(qty_correction._so_lines_to_lock(dn.name, 1500), {own, spill})
+		self.assertEqual(qty_correction._so_lines_to_lock("FB/DN/NO-SUCH-DN", 1500), set())
+
+	def test_a_held_line_of_its_own_is_lock_retry(self):
+		so = self.so(1000)
+		dn = self.dn([(so, 400)])
+		self.amend_while_held(dn, 450, so)
+		self.assertEqual(self.draft_qty(dn), 400)
+
+	def test_a_held_spill_over_line_is_lock_retry(self):
+		so_a = self.so(1000)
+		so_b = self.so(5000)
+		dn = self.dn([(so_a, 900)], submit=True)
+		self.amend_while_held(dn, 1500, so_b)  # 100 more on so_a's line, 500 onto so_b's
+		self.assertEqual((self.soi(so_a, "delivered_qty"), self.soi(so_b, "delivered_qty")), (900, 0))
+
+	def test_an_amend_that_waited_for_the_line_sees_what_the_holder_committed(self):
+		"""The snapshot is taken after the lock. Another session holds the line and grows a draft on
+		it while the amend waits; once it commits, the amend's headroom check counts that draft."""
+		so = self.so(1000)
+		held = self.dn([(so, 400)])
+		dn = self.dn([(so, 400)])  # 200 left: room for one +150, not two
+		frappe.db.commit()
+		other = self.hold(so.items[0].name)
+		cursor = other.cursor()
+		cursor.execute("update `tabDelivery Note Item` set qty = 550 where parent = %s", held.name)
+		cursor.execute(
+			"update `tabSales Order Item` set custom_delivery_note_qty_in_draft = 950 where name = %s",
+			so.items[0].name,
+		)
+		waiter = self.commit_once_waiting(other)
+
+		with self.lock_wait(15):
+			r = self.amend(dn.name, 550)
+		waiter.join()
+
+		self.assertRefused(r, "SO_HEADROOM")
+		self.assertEqual((self.draft_qty(held), self.draft_qty(dn)), (550, 400))
+		self.assertIsNone(self.log())
+
+	def test_a_line_it_did_not_lock_is_lock_retry(self):
+		"""The lines to lock are read before the transaction; if the amend then needs another one
+		(here: a Sales Order it did not see), it refuses rather than read it unlocked."""
+		so_a = self.so(1000)
+		so_b = self.so(5000)
+		dn = self.dn([(so_a, 900)], submit=True)
+		with patch.object(qty_correction, "_so_lines_to_lock", return_value={so_a.items[0].name}):
+			r = self.amend(dn.name, 1500)
+		self.assertRefused(r, "LOCK_RETRY", retryable=True)
+		self.assertIn(so_b.items[0].name, r["message"])
+		self.assertUntouched(dn)
+
+	def test_plan_takes_no_lock(self):
+		so = self.so(1000)
+		dn = self.dn([(so, 400)], submit=True)
+		frappe.db.commit()
+		self.hold(so.items[0].name)
+		with self.lock_wait(1):
+			self.assertTrue(self.plan(dn.custom_invoiced_item_id, 900)["ok"])
 
 
 class TestGetAmendmentPlan(QtyCorrectionTestCase):
