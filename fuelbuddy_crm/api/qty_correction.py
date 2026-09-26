@@ -46,6 +46,12 @@ READ) takes the transaction's snapshot, so every read after them sees what was c
 they were granted. If the amend ends up using a line it did not lock (the Delivery Note or its
 Sales Orders changed in between), it refuses with ``LOCK_RETRY``.
 
+The lock holds only against other amends. A fresh punch (a draft insert, off the IDEV-3160 lane)
+checks headroom in dn_validation.enforce_so_headroom with plain reads and locks nothing first, so
+an amend and a punch on one line can still both pass and over-subscribe it, and the punch can
+leave the line's draft reservation stale; the same pre-existing race two punches have, out of
+scope here.
+
 Cut-off: ``not_after`` is the ticket's ``apply_cutoff_at``. The database clock is compared with
 it inside the transaction, again just before the commit, so a slow or retried amend cannot land
 after it (``DEADLINE``).
