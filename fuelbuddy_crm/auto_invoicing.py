@@ -331,14 +331,18 @@ def rebuild_lines_from_dn_range(doc, method=None):
 	"""Sales Invoice ``before_validate``: the MANUAL period invoice. Replaces the
 	"Auto Pick of DN at Sales Invoice and Update of Qty" Server Script, keeping its
 	contract -- new invoices only; ``custom_dn_from_date`` / ``custom_dn_to_date``
-	define the period; only ``To Bill`` / ``Partly Billed`` DNs count, and a Partly
-	Billed row contributes just its unbilled fraction ``qty * (amount - billed_amt)
-	/ amount``; an SO line with no delivery in range refuses the save (the script
-	zeroed it, which ERPNext then refused as a zero quantity -- same outcome, one
-	message instead of two).
+	define the period; only ``To Bill`` / ``Partially Billed`` DNs count, and a
+	partly billed row contributes just its unbilled fraction ``qty * (amount -
+	billed_amt) / amount``; an SO line with no delivery in range refuses the save
+	(the script zeroed it, which ERPNext then refused as a zero quantity -- same
+	outcome, one message instead of two).
 
 	What changes: the rollup is per delivery, through ``_split_lines``, so a manual
-	invoice honours Force Majeure exactly like a scheduler one (IDEV-3129). Runs
+	invoice honours Force Majeure exactly like a scheduler one (IDEV-3129). The
+	script's filter said ``Partly Billed`` -- ERPNext's Purchase Receipt status; a
+	Delivery Note says ``Partially Billed`` -- so it never matched one, and the
+	unbilled lines of a DN split over two SO lines were left off the second SO's
+	invoice once the first was billed (IDEV-3270). Runs
 	before the controller's validate so ERPNext computes stock qty, amounts and
 	totals off the rebuilt lines itself; the Server Script ran after and had to
 	patch them by hand. Scheduler invoices arrive with their lines already built
@@ -363,7 +367,7 @@ def rebuild_lines_from_dn_range(doc, method=None):
 		from `tabDelivery Note Item` dni
 		join `tabDelivery Note` dn on dn.name = dni.parent
 		where dn.docstatus = 1
-			and dn.status in ('To Bill', 'Partly Billed')
+			and dn.status in ('To Bill', 'Partially Billed')
 			and dn.posting_date between %(from_date)s and %(to_date)s
 			and dni.so_detail in %(so_details)s
 		order by dn.posting_date, dn.name, dni.idx
