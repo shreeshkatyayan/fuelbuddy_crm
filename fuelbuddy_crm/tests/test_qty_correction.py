@@ -542,7 +542,10 @@ class TestSalesOrderHeadroom(QtyCorrectionTestCase):
 		ret.posting_date = "2026-08-16"
 		ret.set_posting_time = 1
 		ret.insert()
-		ret.submit()
+		# Submitted as loaded afresh, the way the desk and REST submit it: ERPNext adds the
+		# returned_qty updaters in __init__ only when is_return is already set, and
+		# make_sales_return sets it after building the doc.
+		frappe.get_doc("Delivery Note", ret.name).submit()
 		self.assertEqual((self.soi(so, "delivered_qty"), self.soi(so, "returned_qty")), (900, 100))
 
 		punch = self.dn([(so, 100)])  # exactly what the return gave back
