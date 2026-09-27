@@ -138,6 +138,9 @@ class FakeDB:
 	def sql_list(self, query, values=None, **kwargs):
 		return [row[0] for row in self.sql(query, values)]
 
+	def has_column(self, doctype, column):
+		return column in {row[1] for row in self.conn.execute(f"pragma table_info(`tab{doctype}`)")}
+
 	def get_value(self, doctype, name, fieldname, **kwargs):
 		rows = self.sql(f"select `{fieldname}` from `tab{doctype}` where name = %s", name)
 		return rows[0][0] if rows else None

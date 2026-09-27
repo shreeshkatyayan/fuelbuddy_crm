@@ -414,4 +414,9 @@ scheduler_events = {
     "monthly": [
         "fuelbuddy_crm.sales_automation.generate_monthly_contract_sales_orders",
     ],
+    # IDEV-3268: read-only check that DN per_billed / status / billed_amt and the DN -> invoice
+    # links match what the code that owns them would write; Error Log "Billing drift: ..." if not.
+    "daily_long": [
+        "fuelbuddy_crm.billing_repair.nightly_drift_audit",
+    ],
 }
