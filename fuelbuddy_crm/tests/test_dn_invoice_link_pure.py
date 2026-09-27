@@ -354,6 +354,35 @@ class TestLockOrder(DnInvoiceLinkCase):
 		self.assertEqual(si_events["on_cancel"], "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice")
 
 
+class TestAuditLinks(DnInvoiceLinkCase):
+	def test_clean_allocation_has_no_findings(self):
+		self.s.dn("DN-A", "2026-09-01", 100)
+		self.s.dn("DN-B", "2026-09-02", 100)
+		self.m.allocate_sales_invoice(self.s.si("SI-1", [("SOI-1", 150)], docstatus=1))
+		self.mark()
+		found = self.m.audit_links()
+		self.assertEqual({k: v["count"] for k, v in found.items()}, dict.fromkeys(found, 0))
+		self.assertEqual(self.dn_updates(), [])
+		self.assertFalse(
+			any(q.split(" ", 1)[0].lower() in ("update", "insert", "delete") for q in self.statements())
+		)
+
+	def test_each_finding(self):
+		self.s.si("SI-LIVE", [("SOI-1", 100)], docstatus=1)
+		self.s.si("SI-CANC", [("SOI-1", 100)], docstatus=2)
+		for name, docstatus in (("DN-CANC", 2), ("DN-1", 1), ("DN-2", 1), ("DN-3", 1), ("DN-4", 1)):
+			self.s.dn(name, "2026-09-01", 60, docstatus=docstatus)
+		self.s.set("Delivery Note", "DN-CANC", custom_sales_invoice="SI-LIVE", custom_sales_invoice_qty=10)
+		self.s.set("Delivery Note", "DN-1", custom_sales_invoice="SI-LIVE", custom_sales_invoice_qty=60)
+		self.s.set("Delivery Note", "DN-2", custom_sales_invoice="SI-LIVE", custom_sales_invoice_qty=60)
+		self.s.set("Delivery Note", "DN-3", custom_sales_invoice="SI-CANC", custom_sales_invoice_qty=60)
+		self.s.set("Delivery Note", "DN-4", custom_sales_invoice="SI-GONE", custom_sales_invoice_qty=60)
+		found = self.m.audit_links(sample=1)
+		self.assertEqual(found["linked_not_submitted"], {"count": 1, "sample": ["DN-CANC"]})
+		self.assertEqual(found["linked_to_dead_invoice"], {"count": 2, "sample": ["DN-3"]})
+		self.assertEqual(found["over_linked"], {"count": 1, "sample": ["SI-LIVE"]})  # 130 L on 100 L
+
+
 class TestConvergence(unittest.TestCase):
 	"""Whatever links are stored (for instance a mix left by two overlapping re-allocations read
 	from old snapshots), one run leaves exactly the allocation a clean run gives."""

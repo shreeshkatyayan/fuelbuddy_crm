@@ -293,3 +293,40 @@ def backfill(from_date="2026-06-01"):
 			print(f"{i}/{len(names)}")
 	frappe.flags.mute_messages = False
 	return len(names)
+
+
+# ---- audit (read-only; fuelbuddy_crm.billing_repair.audit / nightly_drift_audit) --------------
+OVER_LINK_TOLERANCE = 0.001  # litres; stored litres are DECIMAL(21,9), a few frontier rows round
+
+
+def audit_links(sample=20):
+	"""Read-only checks of what this module promises, each {"count", "sample"} (up to ``sample``
+	names). Anything counted is drift an invoice re-run (or a missed DN event) left behind:
+
+	- linked_not_submitted: a DN carries a link but is not a submitted non-return DN (a cancel
+	  that skipped the link hooks, e.g. under the dubai fb_skip_billing_status flag);
+	- linked_to_dead_invoice: the link names a missing, cancelled or return invoice;
+	- over_linked: an invoice's DNs carry more litres than its rows with an SO line bill."""
+	checks = {
+		"linked_not_submitted": f"""select name from `tabDelivery Note`
+			where ifnull(`{LINK_FIELD}`, '') != '' and (docstatus != 1 or is_return = 1) order by name""",
+		"linked_to_dead_invoice": f"""select dn.name from `tabDelivery Note` dn
+			left join `tabSales Invoice` si on si.name = dn.`{LINK_FIELD}`
+			where ifnull(dn.`{LINK_FIELD}`, '') != ''
+			and (si.name is null or si.docstatus = 2 or si.is_return = 1)
+			order by dn.name""",
+		"over_linked": f"""select l.si from (
+				select `{LINK_FIELD}` as si, sum(`{QTY_FIELD}`) as linked from `tabDelivery Note`
+				where ifnull(`{LINK_FIELD}`, '') != '' group by `{LINK_FIELD}`) l
+			join (
+				select parent as si, sum(case when ifnull(stock_qty, 0) != 0 then stock_qty
+					else qty * (case when ifnull(conversion_factor, 0) != 0 then conversion_factor else 1 end)
+					end) as billed
+				from `tabSales Invoice Item` where ifnull(so_detail, '') != '' group by parent) b on b.si = l.si
+			where l.linked > b.billed + {OVER_LINK_TOLERANCE} order by l.si""",
+	}
+	out = {}
+	for key, query in checks.items():
+		names = frappe.db.sql_list(query)
+		out[key] = {"count": len(names), "sample": names[:sample]}
+	return out
