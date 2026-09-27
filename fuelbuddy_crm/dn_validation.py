@@ -85,8 +85,19 @@ def sync_draft_reservation(doc, method=None):
 
 	This replaces the "Sales Order updated with Draft qty of delivery note" Server Script,
 	which ran on After Save ONLY -- so it never released the reservation when a draft DN
-	was cancelled or deleted, and left SO lines reserved forever."""
-	for so_detail in _so_details(doc):
+	was cancelled or deleted, and left SO lines reserved forever.
+
+	The lines recomputed are the ones the DN points at now AND the ones it pointed at before
+	this save (get_doc_before_save, as dn_invoice_link reads it). A line the save dropped --
+	a quantity-correction amend trimming a draft, erp-functions' updateDeliveryNote replacing
+	the items table, a desk edit -- or re-pointed to another SO line is not in the DN any more,
+	and would otherwise keep this DN's old qty reserved for good."""
+	lines = _so_details(doc)
+	before = doc.get_doc_before_save()
+	if before:
+		lines |= _so_details(before)
+	# One fixed order, so two saves that touch the same SO lines take their row locks alike.
+	for so_detail in sorted(lines):
 		# This DN's own rows are excluded from the SQL and added back only while it is
 		# still a live draft -- on_trash runs before the rows are gone, and on_submit /
 		# on_cancel run before/after a docstatus change the SQL may not see yet.
