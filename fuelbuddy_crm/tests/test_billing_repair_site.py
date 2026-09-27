@@ -102,6 +102,15 @@ class TestBillingRepairSite(FrappeTestCase):
 		self.assertEqual(writes, [])
 		self.assertEqual(set(report.links), {"linked_not_submitted", "linked_to_dead_invoice", "over_linked"})
 
+	def test_the_core_guard_holds_through_the_repair(self):
+		"""What bench execute gets: _core() installs, so the api's upgrade guard can hold (on the
+		pinned lab / prod versions) instead of tripping on a missing stock walk."""
+		from fuelbuddy_crm.billing_recheck import guard, install
+
+		self.assertIs(billing_repair._core(), api)
+		self.assertTrue(install.installed())
+		self.assertEqual(guard.mismatches(), [])
+
 	def test_line_check_through_the_core_writes_nothing(self):
 		"""The billed_amt pass (api.stock_would_change per SO line) on the smallest invoiced lines."""
 		lines = frappe.db.sql_list(

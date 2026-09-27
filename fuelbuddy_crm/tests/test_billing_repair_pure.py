@@ -18,6 +18,7 @@ site test's job (test_billing_repair_site.py); here the values are chosen to be 
 """
 
 import os
+import types
 import unittest
 
 try:
@@ -359,6 +360,24 @@ class TestRepair(RepairCase):
 		self.assertIn("ValueError", report.dns["skipped"])
 		self.assertEqual(report.lines["checked"], 1)
 		self.assertEqual(self.m.not_checked(report), ["dns"])
+
+	def test_the_core_is_installed_before_use(self):
+		# bench execute runs no before_request / before_job hook: without install() the api's guard
+		# would see no stock walk and trip on every check
+		calls = []
+		m = ff.load(MODULE, self.frappe)  # the real _core
+
+		class Importer:
+			@staticmethod
+			def import_module(name):
+				calls.append(name)
+				if name == m.INSTALL_MODULE:
+					return types.SimpleNamespace(install=lambda: calls.append("install()"))
+				return "api"
+
+		m.importlib = Importer
+		self.assertEqual(m._core(), "api")
+		self.assertEqual(calls, [m.INSTALL_MODULE, "install()", m.CORE_MODULE])
 
 	def test_lines_off_is_not_a_failure(self):
 		self.seed()

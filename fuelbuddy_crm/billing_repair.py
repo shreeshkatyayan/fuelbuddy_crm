@@ -60,6 +60,7 @@ from frappe.utils import cint
 #       Read-only: the DNs whose stored per_billed / status differ from stock's refresh.
 #   GuardError: the running ERPNext / frappe code is not the pinned code (both reads raise it).
 CORE_MODULE = "fuelbuddy_crm.billing_recheck.api"
+INSTALL_MODULE = "fuelbuddy_crm.billing_recheck.install"
 
 LOG_TITLE = "Billing drift"
 SAMPLE = 20
@@ -70,6 +71,12 @@ def logger():
 
 
 def _core():
+	"""billing_recheck.api, with the billing re-check installed in this process first. Its upgrade
+	guard also checks that the stock walk it falls back to is ERPNext's own function, which it only
+	knows once install() ran; ``bench execute`` runs no before_request / before_job hook, so without
+	this every check here would report the guard as tripped. Idempotent; the repair itself only
+	calls stock code (update_billing_percentage) and api.recompute_line, which the patches leave alone."""
+	importlib.import_module(INSTALL_MODULE).install()
 	return importlib.import_module(CORE_MODULE)
 
 
