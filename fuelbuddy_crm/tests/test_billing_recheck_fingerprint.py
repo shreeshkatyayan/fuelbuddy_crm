@@ -260,5 +260,58 @@ class TestRealCheckouts(unittest.TestCase):
 		self.check("frappe")
 
 
+def _source_tree(name):
+	return ast.parse((REPO / "fuelbuddy_crm" / "billing_recheck" / name).read_text())
+
+
+def _same(testcase, ours, stock):
+	testcase.assertEqual(fp.canonical(ours), fp.canonical(stock))
+
+
+class TestCopiedStockCode(unittest.TestCase):
+	"""The statements the re-check copies from ERPNext are ERPNext's, statement for statement."""
+
+	def test_walk_queries_are_stocks(self):
+		fixture = (
+			pathlib.Path(__file__).parent
+			/ "fixtures"
+			/ "erpnext_v15_96_0_update_billed_amount_based_on_so.py.txt"
+		)
+		stock = fp.find(ast.parse(fixture.read_text()), fp.WALK).body
+		walk = _source_tree("walk.py")
+		# stock: [import Sum, si, si_item, sum_amount, billed = qb...run(), billed = b and b[0][0] or 0,
+		#         dn, dn_item, dn_details = qb...run(as_dict=True), updated_dn, for, return]
+		billed = fp.without_docstring(fp.find(walk, "billed_against_so_of").body)
+		for ours, theirs in zip(billed[:4], stock[1:5], strict=True):
+			_same(self, ours, theirs)
+		_same(self, billed[4].value, stock[5].value)
+		rows = fp.without_docstring(fp.find(walk, "stock_rows").body)
+		for ours, theirs in zip(rows[:2], stock[6:8], strict=True):
+			_same(self, ours, theirs)
+		query = rows[2].value
+		for node in ast.walk(query):  # ours selects the stored billed_amt as well: take it out
+			if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "select":
+				node.args = [a for a in node.args if ast.unparse(a) != "dn_item.billed_amt"]
+		_same(self, query, stock[8].value)
+
+	def test_invoice_body_is_stocks(self):
+		root = checkout_root(self, "erpnext")
+		stock = fp.find(
+			ast.parse((root / fp.ERPNEXT_MODULES["sales_invoice"]).read_text()),
+			"SalesInvoice.update_billing_status_in_dn",
+		)
+		wrapper = fp.find(_source_tree("bulk.py"), "wrap_update_billing_status_in_dn")
+		ours = next(n for n in ast.walk(wrapper) if isinstance(n, ast.FunctionDef) and n.name == stock.name)
+		# ours: [switch and guard checks, import of the module, *stock's body but its final loop, refresh()]
+		start = next(i for i, node in enumerate(ours.body) if isinstance(node, ast.ImportFrom)) + 1
+		rename = "si_mod.update_billed_amount_based_on_so"
+		ours_body = ast.unparse(ast.Module(body=ours.body[start:-1], type_ignores=[]))
+		self.assertIn(rename, ours_body)
+		stock_body = ast.Module(body=stock.body[:-1], type_ignores=[])
+		_same(self, ast.parse(ours_body.replace(rename, fp.WALK)), ast.parse(ast.unparse(stock_body)))
+		self.assertIsInstance(stock.body[-1], ast.For)
+		self.assertEqual(ast.unparse(ours.body[-1]), "refresh(set(updated_delivery_notes), update_modified)")
+
+
 if __name__ == "__main__":
 	unittest.main()

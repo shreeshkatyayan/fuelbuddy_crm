@@ -212,12 +212,15 @@ override_doctype_dashboards = {
 
 # Request Events
 # ----------------
-# before_request = ["fuelbuddy_crm.utils.before_request"]
+# IDEV-3268: install the billing re-check (fuelbuddy_crm.billing_recheck) in every web
+# request and background job before any document code runs. Inert until switched on in
+# site_config.json.
+before_request = ["fuelbuddy_crm.billing_recheck.install.before_request"]
 # after_request = ["fuelbuddy_crm.utils.after_request"]
 
 # Job Events
 # ----------
-# before_job = ["fuelbuddy_crm.utils.before_job"]
+before_job = ["fuelbuddy_crm.billing_recheck.install.before_job"]
 # after_job = ["fuelbuddy_crm.utils.after_job"]
 
 # User Data Protection
@@ -352,10 +355,16 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.sync_draft_reservation",
             "fuelbuddy_crm.dn_invoice_link.on_delivery_note_update",
         ],
-        "on_submit": "fuelbuddy_crm.dn_validation.sync_draft_reservation",
+        # billing_recheck.install.count_not_installed: counts a switched-on billing
+        # re-check that ran stock code in a process that was never installed (IDEV-3268).
+        "on_submit": [
+            "fuelbuddy_crm.dn_validation.sync_draft_reservation",
+            "fuelbuddy_crm.billing_recheck.install.count_not_installed",
+        ],
         "on_cancel": [
             "fuelbuddy_crm.dn_validation.sync_draft_reservation",
             "fuelbuddy_crm.dn_invoice_link.on_delivery_note_cancel",
+            "fuelbuddy_crm.billing_recheck.install.count_not_installed",
         ],
         "on_trash": [
             "fuelbuddy_crm.dn_validation.sync_draft_reservation",
@@ -379,7 +388,10 @@ doc_events = {
         # last-invoiced date so the auto-invoicing scheduler never re-bills a
         # period already covered (IDEV-3000).
         "after_insert": "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
-        "on_submit": "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+        "on_submit": [
+            "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+            "fuelbuddy_crm.billing_recheck.install.count_not_installed",
+        ],
         # IDEV-3129: Force Majeure is decided per delivery and lands on the invoice.
         # Manual invoices are re-rated here per DN-linked line; auto-invoicing splits
         # its own lines in _make_draft_invoice.
@@ -393,7 +405,10 @@ doc_events = {
         # DN window) restamps the DNs this invoice billed; cancel/delete clears them.
         "on_update": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_update_after_submit": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
-        "on_cancel": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
+        "on_cancel": [
+            "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
+            "fuelbuddy_crm.billing_recheck.install.count_not_installed",
+        ],
         "on_trash": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
     },
 }
