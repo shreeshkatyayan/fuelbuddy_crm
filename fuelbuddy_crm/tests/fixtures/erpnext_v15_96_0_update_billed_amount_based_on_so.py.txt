@@ -1,0 +1,84 @@
+# ERPNext v15.96.0 (git tag v15.96.0, 6ba8725940c7), erpnext/stock/doctype/delivery_note/delivery_note.py
+# lines 772-850, verbatim. Copyright (c) Frappe Technologies Pvt. Ltd. and contributors, GNU GPL v3.
+# Test data for tests/test_billing_recheck_fifo.py, which checks it against the pinned fingerprint
+# (billing_recheck/fingerprint_pins.json) and executes it as the reference for billing_recheck.fifo.
+
+def update_billed_amount_based_on_so(so_detail, update_modified=True):
+	from frappe.query_builder.functions import Sum
+
+	# Billed against Sales Order directly
+	si = frappe.qb.DocType("Sales Invoice").as_("si")
+	si_item = frappe.qb.DocType("Sales Invoice Item").as_("si_item")
+	sum_amount = Sum(si_item.amount).as_("amount")
+
+	billed_against_so = (
+		frappe.qb.from_(si_item)
+		.join(si)
+		.on(si.name == si_item.parent)
+		.select(sum_amount)
+		.where(
+			(si_item.so_detail == so_detail)
+			& ((si_item.dn_detail.isnull()) | (si_item.dn_detail == ""))
+			& (si_item.docstatus == 1)
+			& (si.update_stock == 0)
+		)
+		.run()
+	)
+	billed_against_so = billed_against_so and billed_against_so[0][0] or 0
+
+	# Get all Delivery Note Item rows against the Sales Order Item row
+	dn = frappe.qb.DocType("Delivery Note").as_("dn")
+	dn_item = frappe.qb.DocType("Delivery Note Item").as_("dn_item")
+
+	dn_details = (
+		frappe.qb.from_(dn)
+		.from_(dn_item)
+		.select(dn_item.name, dn_item.amount, dn_item.si_detail, dn_item.parent)
+		.where(
+			(dn.name == dn_item.parent)
+			& (dn_item.so_detail == so_detail)
+			& (dn.docstatus == 1)
+			& (dn.is_return == 0)
+		)
+		.orderby(dn.posting_date, dn.posting_time, dn.name)
+		.run(as_dict=True)
+	)
+
+	updated_dn = []
+	for dnd in dn_details:
+		billed_amt_agianst_dn = 0
+
+		# If delivered against Sales Invoice
+		if dnd.si_detail:
+			billed_amt_agianst_dn = flt(dnd.amount)
+			billed_against_so -= billed_amt_agianst_dn
+		else:
+			# Get billed amount directly against Delivery Note
+			billed_amt_agianst_dn = frappe.db.sql(
+				"""select sum(amount) from `tabSales Invoice Item`
+				where dn_detail=%s and docstatus=1""",
+				dnd.name,
+			)
+			billed_amt_agianst_dn = billed_amt_agianst_dn and billed_amt_agianst_dn[0][0] or 0
+
+		# Distribute billed amount directly against SO between DNs based on FIFO
+		if billed_against_so and billed_amt_agianst_dn < dnd.amount:
+			pending_to_bill = flt(dnd.amount) - billed_amt_agianst_dn
+			if pending_to_bill <= billed_against_so:
+				billed_amt_agianst_dn += pending_to_bill
+				billed_against_so -= pending_to_bill
+			else:
+				billed_amt_agianst_dn += billed_against_so
+				billed_against_so = 0
+
+		frappe.db.set_value(
+			"Delivery Note Item",
+			dnd.name,
+			"billed_amt",
+			billed_amt_agianst_dn,
+			update_modified=update_modified,
+		)
+
+		updated_dn.append(dnd.parent)
+
+	return updated_dn
