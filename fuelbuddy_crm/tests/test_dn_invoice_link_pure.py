@@ -358,7 +358,10 @@ class TestLockOrder(DnInvoiceLinkCase):
 			],
 		)
 		self.assertEqual(si_events["on_update"], "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice")
-		self.assertEqual(si_events["on_cancel"], "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice")
+		# on_cancel also carries the billing re-check's not-installed counter; the clear runs first
+		on_cancel = si_events["on_cancel"]
+		on_cancel = [on_cancel] if isinstance(on_cancel, str) else on_cancel
+		self.assertEqual(on_cancel[0], "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice")
 
 
 class TestAuditLinks(DnInvoiceLinkCase):
