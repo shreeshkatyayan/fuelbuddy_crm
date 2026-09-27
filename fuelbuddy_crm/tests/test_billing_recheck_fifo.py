@@ -212,6 +212,22 @@ class TestWriteSkip(unittest.TestCase):
 		self.assertTrue(fifo.needs_write(None, 0))
 		self.assertTrue(fifo.needs_write(float(band), float(band)))  # stock's rewrite may move it
 		self.assertTrue(fifo.needs_write(-float(band), -float(band)))
+		self.assertTrue(fifo.needs_write(float(band), band - 0.5))
+		# stock's float arithmetic below the 9th decimal: writing it stores the same decimal (site tests)
+		self.assertFalse(fifo.needs_write(572.13, 572.1299999999999))
+		self.assertFalse(fifo.needs_write(105.3, 105.30000000000018))
+		self.assertFalse(fifo.needs_write(-572.13, -572.1299999999999))
+		# a tie at the 10th decimal rounds half away from zero, as MariaDB stores it
+		self.assertFalse(fifo.needs_write(1.000000001, 1.0000000005))
+		self.assertTrue(fifo.needs_write(1.0, 1.0000000005))
+		self.assertFalse(fifo.needs_write(-1.000000001, -1.0000000005))
+
+	def test_written_decimal(self):
+		self.assertEqual(fifo.written_decimal(572.1299999999999), Decimal("572.130000000"))
+		self.assertEqual(fifo.written_decimal(1.0000000005), Decimal("1.000000001"))
+		self.assertEqual(fifo.written_decimal(1.0000000004999), Decimal("1.000000000"))
+		self.assertEqual(fifo.written_decimal(-2.5000000005), Decimal("-2.500000001"))
+		self.assertEqual(fifo.written_decimal(0), Decimal("0E-9"))
 
 	def test_changed_rows_are_the_rows_whose_value_differs(self):
 		amounts = [100.0] * 6 + [fifo.EXACT_ROUND_TRIP + 1.5]
@@ -236,6 +252,29 @@ class TestWriteSkip(unittest.TestCase):
 			[r.name for r, _v in changed],
 			[r.name for r in rows if abs(r.billed_amt) >= fifo.EXACT_ROUND_TRIP],
 		)
+
+	def test_after_stock_wrote_through_the_database_only_band_rows_change(self):
+		"""Stock's values as the database stores them (written_decimal, read back as a float): a second
+		walk over the same line changes no row below 2**23, even where its float arithmetic leaves noise
+		below the 9th decimal (the float-only rule rewrote those rows and the drift audit listed them)."""
+		rnd = random.Random(572)
+		noisy = 0
+		for _case in range(300):
+			n = rnd.randint(1, 80)
+			amounts = [round(rnd.uniform(0, 3e4), rnd.choice([2, 3, 9])) for _ in range(n)]
+			if rnd.random() < 0.1:
+				amounts.append(9e6 + 0.123456789)
+			rows = [Row(r) for r in line(amounts)]
+			values = fifo.stock_values(round(sum(amounts) * rnd.uniform(0.1, 1.1), 2), rows, {}, frappe_flt)
+			for row, value in zip(rows, values, strict=True):
+				row["billed_amt"] = float(fifo.written_decimal(value))
+				noisy += row["billed_amt"] != value
+			changed = fifo.changed_rows(rows, values)
+			self.assertEqual(
+				[r.name for r, _v in changed],
+				[r.name for r in rows if abs(r.billed_amt) >= fifo.EXACT_ROUND_TRIP],
+			)
+		self.assertGreater(noisy, 0)  # the case the rule exists for did occur
 
 	def test_round_trip_band_under_a_decimal_model(self):
 		"""The rationale for 2**23 under a model of the database (DECIMAL(21,9), the float rounded

@@ -59,12 +59,12 @@ def stock_would_change(so_detail, header=True):
 	"""{"so_detail", "predicted", "reason", "rows", "header"}.
 
 	``rows``: [{"name", "parent", "stored", "stock"}] for the Delivery Note Items whose billed_amt stock
-	would change (stored value differs from stock's; stock's own rewrite of an equal value at or above
-	2**23 is not drift). None when ``predicted`` is False: a Delivery Note with two rows on the line
-	(stock's order between them is undefined) or a row with si_detail (not modelled); recompute_line
-	then runs stock's walk. ``header``: header_drift of the line's Delivery Notes, from their stored
-	items (so recompute rows first when ``rows`` is not empty); None with ``header=False`` (the repair
-	job checks every Delivery Note's header in its own pass)."""
+	would change (stock's write would store a different decimal, fifo.needs_write; stock's own rewrite
+	of an equal value at or above 2**23 is not drift). None when ``predicted`` is False: a Delivery
+	Note with two rows on the line (stock's order between them is undefined) or a row with si_detail
+	(not modelled); recompute_line then runs stock's walk. ``header``: header_drift of the line's
+	Delivery Notes, from their stored items (so recompute rows first when ``rows`` is not empty); None
+	with ``header=False`` (the repair job checks every Delivery Note's header in its own pass)."""
 	_require_guard()
 	line = walk.line_stats(so_detail)
 	out = {"so_detail": so_detail, "predicted": True, "reason": None, "rows": []}
@@ -74,6 +74,8 @@ def stock_would_change(so_detail, header=True):
 		out.update(predicted=False, reason="multi_item", rows=None)
 	else:
 		for row, value in walk.changes(so_detail):
+			# walk.changes also lists every row at or above 2**23 (always written); an equal float there
+			# is not drift
 			if row.billed_amt is None or value != row.billed_amt:
 				out["rows"].append(
 					{"name": row.name, "parent": row.parent, "stored": row.billed_amt, "stock": value}

@@ -4,11 +4,14 @@ Pure: no frappe import, so it is unit-tested against the stock function itself
 (tests/test_billing_recheck_fifo.py). billing_recheck.walk feeds it the rows stock reads.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
+
 # A DECIMAL(21,9) value read through frappe (as a float) and written back through set_value stores the
 # same decimal only while half a float step is below 5e-10, i.e. below 2**23 (lab: 0 of 254,816 values
 # below it moved, 41,622 of 53,829 above it did; IDEV-3268 lab evidence ROUNDTRIP.json). At or
 # above it a rewrite by stock can move the stored value, so those rows are always written, as stock does.
 EXACT_ROUND_TRIP = 2**23
+NINE_PLACES = Decimal("1e-9")
 
 
 def stock_values(billed_against_so, rows, direct, flt):
@@ -50,9 +53,24 @@ def stock_values(billed_against_so, rows, direct, flt):
 	return values
 
 
+def written_decimal(value):
+	"""The DECIMAL(21,9) that frappe.db.set_value stores for the float ``value``: PyMySQL (pinned) sends
+	repr(value) as '<repr>e0', and MariaDB rounds that decimal half away from zero to 9 places (lab,
+	through set_value: 29,088 of 29,088 writes matched, 4,000 of them repr ties at the 10th decimal,
+	where half-even would differ in 2,019; IDEV-3268 lab evidence G_decimal_write_model_probe.json)."""
+	return Decimal(repr(float(value))).quantize(NINE_PLACES, rounding=ROUND_HALF_UP)
+
+
 def needs_write(stored, value):
-	"""False only when stock's write of ``value`` would store exactly ``stored`` again."""
-	return stored is None or value != stored or abs(value) >= EXACT_ROUND_TRIP
+	"""False only when stock's write of ``value`` would store exactly ``stored`` again.
+
+	``stored`` is the column as frappe reads it (a float). Below 2**23 written_decimal(stored) is the
+	stored decimal itself, so the write is skipped when ``value`` rounds to the same decimal: stock's float
+	arithmetic gives e.g. 572.1299999999999 for a row that holds 572.130000000, and writing it stores
+	572.130000000 again. At or above 2**23 every row is written, as stock does."""
+	if stored is None or abs(value) >= EXACT_ROUND_TRIP or abs(stored) >= EXACT_ROUND_TRIP:
+		return True
+	return value != stored and written_decimal(value) != written_decimal(stored)
 
 
 def changed_rows(rows, values):
