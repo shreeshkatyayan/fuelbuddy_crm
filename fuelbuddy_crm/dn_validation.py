@@ -94,7 +94,10 @@ def sync_draft_reservation(doc, method=None):
 		if doc.docstatus == 0 and method != "on_trash":
 			drafted += flt(sum(flt(r.qty) for r in doc.items if r.get("so_detail") == so_detail))
 		frappe.db.set_value(
-			"Sales Order Item", so_detail, "custom_delivery_note_qty_in_draft", drafted,
+			"Sales Order Item",
+			so_detail,
+			"custom_delivery_note_qty_in_draft",
+			drafted,
 			update_modified=False,
 		)
 
@@ -182,7 +185,11 @@ def so_headroom_shortfalls(doc):
 		if increase - available > 0.001:
 			shortfalls.append(
 				frappe._dict(
-					so_detail=so_detail, so_item=so_item, increase=increase, available=available, drafted=drafted
+					so_detail=so_detail,
+					so_item=so_item,
+					increase=increase,
+					available=available,
+					drafted=drafted,
 				)
 			)
 	return shortfalls
