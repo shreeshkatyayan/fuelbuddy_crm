@@ -378,7 +378,12 @@ doc_events = {
         # Any invoice (manual or auto, even a Draft) advances the SO's
         # last-invoiced date so the auto-invoicing scheduler never re-bills a
         # period already covered (IDEV-3000).
-        "after_insert": "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+        # lock_so_lines first (IDEV-3268): update_so_last_invoiced writes the SO header, and a DN
+        # submit locks the SO line before the header, so the invoice takes the line first too.
+        "after_insert": [
+            "fuelbuddy_crm.dn_invoice_link.lock_so_lines",
+            "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+        ],
         "on_submit": "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
         # IDEV-3129: Force Majeure is decided per delivery and lands on the invoice.
         # Manual invoices are re-rated here per DN-linked line; auto-invoicing splits
@@ -390,7 +395,8 @@ doc_events = {
         "before_save": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_save",
         "before_submit": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_submit",
         # DN -> Sales Invoice link: every save (draft, submit, allow-on-submit edits of the
-        # DN window) restamps the DNs this invoice billed; cancel/delete clears them.
+        # DN window) re-allocates the DNs this invoice billed, writing only the ones whose link
+        # or litres change; cancel/delete clears them. Both lock the SO line(s) first.
         "on_update": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_update_after_submit": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_cancel": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",

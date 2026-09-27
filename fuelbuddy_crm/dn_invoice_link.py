@@ -20,6 +20,23 @@ took; the second invoice shows the remainder as a shortfall. Quantities are in t
 (litres) on both sides, so IG-priced SO lines work. Only SUBMITTED, non-return DNs take part:
 that is the set fuelbuddy_crm.auto_invoicing sums the invoice quantities from. Split invoices
 carry the DN's department / billing location on the invoice; those are matched when present.
+
+Writes (IDEV-3268): each run computes the invoice's whole allocation from scratch, then writes
+only the difference from what is stored (``_write_links``, the one write path): DNs it no longer
+takes are cleared, new or changed takes are stamped, the rest are not touched. The end state is
+the one clearing every DN the invoice holds and re-stamping every take gives, without locking and
+rewriting the whole window on every invoice save and every DN event inside it.
+
+Lock order (IDEV-3268): allocating and clearing first lock the invoice's Sales Order line rows
+(``lock_so_lines``: SELECT ... FOR UPDATE, one statement, name order), then write DN rows. A DN
+submit / cancel / delete holds its SO line before these hooks run (dn_validation.
+sync_draft_reservation writes it in on_update / on_trash; ERPNext's update_prevdoc_status in
+on_cancel), so invoice saves and DN events on one line queue behind each other in one order: SO
+line, then DN rows. Reads stay plain (a locking read of DN rows would wait on a DN a concurrent
+cancel holds, while that cancel waits for the SO line we hold). Under REPEATABLE READ those reads
+can come from a snapshot taken before the lock was granted (the invoice's validate already read);
+an allocation computed from such a snapshot is corrected by the invoice's next allocation, since
+every run compares with what is stored. ERPNext's own billing walk reads the same way.
 """
 
 import frappe
@@ -29,36 +46,61 @@ from frappe.utils import flt
 LINK_FIELD = "custom_sales_invoice"
 QTY_FIELD = "custom_sales_invoice_qty"
 EPS = 1e-6
+# frappe reads the DECIMAL(21,9) qty column as a float. Below 2**23 that float, written back,
+# stores the same decimal (lab, IDEV-3268: 0 of 254,816 values below it changed, 41,622 of 53,829
+# above it did), so float equality means "writing would store what is there". At or above it the
+# value is always written.
+EXACT_ROUND_TRIP = 2**23
 
 
 # ---- Sales Invoice hooks ---------------------------------------------------------------------
 def allocate_sales_invoice(doc, method=None, exclude_dn=None):
-	"""Rebuild this invoice's DN links from scratch (idempotent)."""
+	"""Bring this invoice's DN links to a fresh allocation (idempotent); writes only what changes."""
 	if frappe.flags.in_install or frappe.flags.in_migrate:
 		return
-	_clear(doc.name)
-	if doc.docstatus == 2 or doc.get("is_return"):
-		return
-
-	takes = {}  # dn name -> litres taken by this invoice
-	for item in doc.items:
-		if not item.so_detail:
-			continue
-		short = _allocate_row(doc, item, takes, exclude_dn)
-		if short > EPS:
-			frappe.msgprint(
-				_("Row {0}: {1} L of {2} L not covered by Delivery Notes on {3} between {4} and {5}").format(
-					item.idx, round(short, 3), round(_litres(item), 3), item.sales_order,
-					doc.custom_dn_from_date or "-", doc.custom_dn_to_date or "-",
-				),
-				title=_("Delivery Note link"),
-				indicator="orange",
-			)
-	_stamp(doc.name, takes)
+	lock_so_lines(doc)
+	takes = {}  # dn name -> litres taken by this invoice; none for a cancelled invoice or a return
+	if doc.docstatus != 2 and not doc.get("is_return"):
+		for item in doc.items:
+			if not item.so_detail:
+				continue
+			short = _allocate_row(doc, item, takes, exclude_dn)
+			if short > EPS:
+				frappe.msgprint(
+					_(
+						"Row {0}: {1} L of {2} L not covered by Delivery Notes on {3} between {4} and {5}"
+					).format(
+						item.idx,
+						round(short, 3),
+						round(_litres(item), 3),
+						item.sales_order,
+						doc.custom_dn_from_date or "-",
+						doc.custom_dn_to_date or "-",
+					),
+					title=_("Delivery Note link"),
+					indicator="orange",
+				)
+	_write_links(doc.name, takes)
 
 
 def clear_sales_invoice(doc, method=None):
-	_clear(doc.name)
+	lock_so_lines(doc)
+	_write_links(doc.name, {})
+
+
+def lock_so_lines(doc, method=None):
+	"""Lock the Sales Order line rows this invoice bills: one statement, rows in name order, so
+	two invoices never take the same lines in a different order.
+
+	Also the first Sales Invoice after_insert hook: update_so_last_invoiced, next in that list,
+	writes the Sales Order header, and a DN submit locks its SO line before the header
+	(update_prevdoc_status), so an invoice insert takes the line before the header too."""
+	names = sorted({item.so_detail for item in doc.items if item.get("so_detail")})
+	if names:
+		frappe.db.sql(
+			"select name from `tabSales Order Item` where name in %(names)s order by name for update",
+			{"names": tuple(names)},
+		)
 
 
 def _litres(row):
@@ -114,6 +156,24 @@ def _allocate_row(doc, item, takes, exclude_dn):
 		takes[c.dn] = takes.get(c.dn, 0) + take
 		left -= take
 	return max(left, 0)
+
+
+def _write_links(si_name, takes):
+	"""The one write path. ``takes`` is the invoice's whole allocation (dn -> litres); against
+	what is stored, clear the DNs it no longer takes and stamp new or changed takes."""
+	held = dict(
+		frappe.db.sql(
+			f"select name, `{QTY_FIELD}` from `tabDelivery Note` where `{LINK_FIELD}` = %s", si_name
+		)
+	)
+	drop = [dn for dn in held if dn not in takes]
+	if drop:
+		_clear(None, dn_names=drop)
+	_stamp(si_name, {dn: qty for dn, qty in takes.items() if dn not in held or not _same(held[dn], qty)})
+
+
+def _same(stored, qty):
+	return stored is not None and flt(stored) == flt(qty) and abs(flt(qty)) < EXACT_ROUND_TRIP
 
 
 def _stamp(si_name, takes):
