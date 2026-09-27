@@ -313,6 +313,13 @@ class TestLockOrder(DnInvoiceLinkCase):
 		self.m.lock_so_lines(si)
 		self.assertEqual(self.statements(), [])
 
+	def test_credit_note_does_not_lock(self):
+		cn = self.s.si("CN-1", [("SOI-1", -100)], docstatus=1, is_return=1)
+		self.mark()
+		self.m.lock_so_lines(cn)
+		self.m.allocate_sales_invoice(cn)
+		self.assertFalse(any("for update" in q for q in self.statements()))
+
 	def test_clear_locks_first(self):
 		self.s.dn("DN-A", "2026-09-01", 100)
 		self.m.allocate_sales_invoice(self.s.si("SI-1", [("SOI-1", 100)], docstatus=1))

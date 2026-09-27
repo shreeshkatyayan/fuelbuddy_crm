@@ -94,7 +94,12 @@ def lock_so_lines(doc, method=None):
 
 	Also the first Sales Invoice after_insert hook: update_so_last_invoiced, next in that list,
 	writes the Sales Order header, and a DN submit locks its SO line before the header
-	(update_prevdoc_status), so an invoice insert takes the line before the header too."""
+	(update_prevdoc_status), so an invoice insert takes the line before the header too.
+
+	Not for a credit note: it takes no DNs, so it has no links to write, and stock ERPNext does
+	not lock the SO line for one either; it should not queue behind the line's DN events."""
+	if doc.get("is_return"):
+		return
 	names = sorted({item.so_detail for item in doc.items if item.get("so_detail")})
 	if names:
 		frappe.db.sql(
