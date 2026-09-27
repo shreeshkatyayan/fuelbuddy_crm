@@ -160,6 +160,8 @@ class TestTwinEvents(BillingRecheckCase):
 		self.assertEqual(delta.get("bulk"), 1)
 		si1 = frappe.get_all("Sales Invoice", {"customer": customer, "docstatus": 1}, pluck="name")[0]
 		self.twin(lambda: fx.make_credit_note(si1, 40), lines, bulk_over=5)  # small set: stock loop
+		cn = frappe.get_all("Sales Invoice", {"return_against": si1, "docstatus": 1}, pluck="name")[0]
+		self.twin(lambda: frappe.get_doc("Sales Invoice", cn).cancel(), lines, bulk_over=5)
 		self.twin(lambda: frappe.get_doc("Sales Invoice", si1).cancel(), lines, bulk_over=5)
 		# bulk with the walk off: stock's full list, refreshed set-based
 		self.twin(

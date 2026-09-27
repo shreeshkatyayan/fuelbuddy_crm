@@ -153,7 +153,9 @@ class TestDnInvoiceLinkSite(FrappeTestCase):
 		if not existing:
 			self.skipTest("no committed Sales Order Item row to lock")
 		line = existing[0]
-		dil.lock_so_lines(types.SimpleNamespace(items=[frappe._dict(so_detail=line)]))
+		dil.lock_so_lines(
+			types.SimpleNamespace(items=[frappe._dict(so_detail=line)], get={"is_return": 0}.get)
+		)
 
 		conf = frappe.conf
 		other = pymysql.connect(

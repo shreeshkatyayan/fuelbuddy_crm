@@ -232,8 +232,8 @@ def snapshot(so_details, extra=()):
 	lines = tuple(so_details) or ("-",)
 	return {
 		"items": frappe.db.sql(
-			"""select name, parent, billed_amt, returned_qty from `tabDelivery Note Item`
-			where parent in %(n)s order by name""",
+			"""select parent, idx, billed_amt, returned_qty from `tabDelivery Note Item`
+			where parent in %(n)s order by parent, idx""",
 			{"n": dns},
 		),
 		"dns": frappe.db.sql(
