@@ -147,6 +147,8 @@ _SI_OWNERS = (
 def _check_classes():
 	out = []
 	try:
+		from frappe.model.base_document import get_controller  # frappe 15 has no frappe.get_controller
+
 		dn_mod, si_mod, sc_mod, su_mod = modules()
 		expected = {
 			"DeliveryNote": dn_mod.DeliveryNote,
@@ -158,7 +160,7 @@ def _check_classes():
 			("Delivery Note", dn_mod.DeliveryNote, _DN_OWNERS),
 			("Sales Invoice", si_mod.SalesInvoice, _SI_OWNERS),
 		):
-			resolved = frappe.get_controller(doctype)
+			resolved = get_controller(doctype)
 			if resolved is not cls:
 				out.append(f"controller:{doctype} is {resolved.__module__}.{resolved.__qualname__}")
 			out += owner_mismatches(resolved, owners, expected)

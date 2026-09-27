@@ -403,11 +403,12 @@ def _controller_gaps():
 	"""The controllers frappe resolves are the stock classes, and the controller methods run_method would
 	call for SKIPPED_METHODS are only Comment's own fingerprinted after_insert / validate / on_update."""
 	from frappe.core.doctype.comment.comment import Comment
+	from frappe.model.base_document import get_controller  # frappe 15 has no frappe.get_controller
 
 	dn_mod, _si, _sc, _su = guard.modules()
 	out = []
 	for doctype, cls in ((DN, dn_mod.DeliveryNote), (COMMENT, Comment)):
-		resolved = frappe.get_controller(doctype)
+		resolved = get_controller(doctype)
 		if resolved is not cls:
 			out.append(f"controller:{doctype} is {resolved.__module__}.{resolved.__qualname__}")
 	allowed = {(COMMENT, "after_insert"), (COMMENT, "validate"), (COMMENT, "on_update")}
