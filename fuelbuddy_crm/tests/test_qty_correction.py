@@ -426,18 +426,6 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 		self.assertRefused(r, "SO_HEADROOM")
 		self.assertUntouched(dn)
 
-	def test_so_headroom_can_refuse_a_reduction(self):
-		"""The reissue is checked on its FULL quantity net of other live drafts: when drafts took
-		the headroom after this DN was submitted, even a smaller reissue does not fit."""
-		so = self.so(1000)
-		dn = self.dn([(so, 600)], submit=True)
-		self.dn([(so, 400)])  # another live draft holds the rest
-		frappe.db.set_value("Sales Order Item", so.items[0].name, "qty", 900)  # order cut afterwards
-		r = self.amend(dn.name, 550)
-		self.assertRefused(r, "SO_HEADROOM")
-		self.assertUntouched(dn)
-		self.assertEqual(self.soi(so, "delivered_qty"), 600)
-
 	def test_invalid_input_is_erp_validation(self):
 		so = self.so(10000)
 		dn = self.dn([(so, 1000)])
@@ -450,7 +438,97 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 
 
 class TestSalesOrderHeadroom(QtyCorrectionTestCase):
-	"""What a Sales Order line has left (IDEV-3266)."""
+	"""IDEV-3266 rulings (27 Sep): a reduction is never refused for Sales Order headroom, an increase
+	keeps the check on what it adds; a return frees Sales Order qty once."""
+
+	def over_booked(self, qty, submit):
+		"""A 1000 L Sales Order line: the Delivery Note under test with ``qty`` on it, another live
+		draft holding the other 1000 - ``qty``, then the order cut to 900 L: over-booked by 100 L.
+		Drafts, not submitted notes, over-book it, so ERPNext's own over-delivery check (which counts
+		only submitted notes) stays out of the way and the headroom check is the one tested."""
+		so = self.so(1000)
+		dn = self.dn([(so, qty)], submit=submit)
+		self.dn([(so, 1000 - qty)])
+		frappe.db.set_value("Sales Order Item", so.items[0].name, "qty", 900)
+		return so, dn
+
+	def test_submitted_reduction_on_an_over_booked_line_is_amended(self):
+		so, dn = self.over_booked(600, submit=True)
+
+		r = self.amend(dn.name, 550)
+
+		self.assertOk(r, "AMENDED")
+		new = frappe.get_doc("Delivery Note", r["new_delivery_note"])
+		self.assertEqual([(row.so_detail, row.qty) for row in new.items], [(so.items[0].name, 550)])
+		self.assertEqual(self.soi(so, "delivered_qty"), 550)
+		self.assertEqual(self.log().result, "AMENDED")
+
+	def test_draft_reduction_on_an_over_booked_line_is_updated(self):
+		so, dn = self.over_booked(600, submit=False)
+
+		self.assertOk(self.amend(dn.name, 550), "DRAFT_UPDATED")
+
+		dn.reload()
+		self.assertEqual([row.qty for row in dn.items], [550])
+		self.assertEqual(self.soi(so, "custom_delivery_note_qty_in_draft"), 950)
+
+	def test_submitted_increase_on_a_full_line_is_refused(self):
+		so, dn = self.over_booked(600, submit=True)
+		self.assertRefused(self.amend(dn.name, 650), "SO_HEADROOM")
+		self.assertUntouched(dn)
+		self.assertEqual(self.soi(so, "delivered_qty"), 600)
+
+	def test_draft_increase_on_a_full_line_is_refused(self):
+		so, dn = self.over_booked(600, submit=False)
+		self.assertRefused(self.amend(dn.name, 650), "SO_HEADROOM")
+		self.assertUntouched(dn)
+		self.assertEqual(frappe.db.get_value("Delivery Note Item", {"parent": dn.name}, "qty"), 600)
+
+	def test_increase_on_an_over_booked_line_spills_onto_the_next_sales_order(self):
+		"""The Delivery Note's own line keeps its 600 L and is not refused, over-booked as it is; the
+		100 L increase goes to the next order, which has room."""
+		so_a, dn = self.over_booked(600, submit=True)
+		so_b = self.so(5000)
+
+		r = self.amend(dn.name, 700)
+
+		self.assertOk(r, "AMENDED")
+		new = frappe.get_doc("Delivery Note", r["new_delivery_note"])
+		self.assertEqual(
+			[(row.against_sales_order, row.qty) for row in new.items], [(so_a.name, 600), (so_b.name, 100)]
+		)
+		self.assertEqual((self.soi(so_a, "delivered_qty"), self.soi(so_b, "delivered_qty")), (600, 100))
+
+	def test_a_grown_line_is_checked_on_the_growth(self):
+		so = self.so(1000)
+		dn = self.dn([(so, 600)], submit=True)
+		self.dn([(so, 300)])  # 100 L left
+
+		r = self.amend(dn.name, 700)  # grows by exactly what is left
+		self.assertOk(r, "AMENDED")
+		self.assertEqual(self.soi(so, "delivered_qty"), 700)
+
+		key = f"{uuid.uuid4()}-2"
+		self.assertRefused(self.amend(r["new_delivery_note"], 710, key=key), "SO_HEADROOM")  # none left
+		self.assertEqual(self.soi(so, "delivered_qty"), 700)
+
+	def test_shortfalls_spare_a_reissue_line_not_grown_past_the_note_it_replaces(self):
+		so = self.so(1000)
+		dn = self.dn([(so, 600)], submit=True)
+		self.dn([(so, 400)])  # the rest is held by a draft
+		dn.reload()
+		dn.cancel()  # what the amend does first: 600 back, 400 held
+		frappe.db.set_value("Sales Order Item", so.items[0].name, "qty", 900)  # 500 left
+		reissue = frappe.copy_doc(dn)
+		reissue.items[0].qty = 550
+
+		(short,) = so_headroom_shortfalls(reissue)  # without the flag: a new 550 L punch
+		self.assertEqual((short.increase, short.available), (550, 500))
+		reissue.flags.qc_replaced_qty = {so.items[0].name: 600}
+		self.assertEqual(so_headroom_shortfalls(reissue), [])
+		reissue.items[0].qty = 650  # grown past the original: its full qty against what is left
+		(short,) = so_headroom_shortfalls(reissue)
+		self.assertEqual((short.increase, short.available), (650, 500))
 
 	def test_a_return_frees_its_qty_once(self):
 		"""ERPNext takes a submitted return off delivered_qty and also records it in returned_qty;

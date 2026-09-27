@@ -18,11 +18,12 @@ feasibility checks: ``SO_CLOSED``, ``PERIOD_CLOSED``, ``INVOICED``, ``DUPLICATE_
 
 ``target_qty`` is litres. Each line's qty is written in that line's UOM (litres / conversion
 factor, some lines are Imperial Gallons). A reduction trims from the last line backwards and
-drops emptied lines; an increase grows the last line within its Sales Order line's headroom and
-spills onto the next Sales Order (fuelbuddy_crm.so_allocator, ported from erp-functions),
-otherwise ``SO_HEADROOM``. The amendment keeps the original's posting date and time
-(``set_posting_time`` on), line rates, taxes and price list; ``amended_from`` is the original
-and ``custom_version`` is parent + 1 via dn_versioning.set_amended_version.
+drops emptied lines, and is never refused for Sales Order headroom, however over-booked the line;
+an increase grows the last line within its Sales Order line's headroom and spills onto the next
+Sales Order (fuelbuddy_crm.so_allocator, ported from erp-functions), otherwise ``SO_HEADROOM``.
+The amendment keeps the original's posting date and time (``set_posting_time`` on), line rates,
+taxes and price list; ``amended_from`` is the original and ``custom_version`` is parent + 1 via
+dn_versioning.set_amended_version.
 
 Idempotency: the episode key goes on the resulting live Delivery Note
 (``custom_qc_idempotency_key``, unique, no_copy) and, in every branch, into a ``DN Amend Log``
@@ -79,7 +80,7 @@ from frappe.utils import flt, get_system_timezone, strip_html
 
 from fuelbuddy_crm import so_allocator
 from fuelbuddy_crm.dn_invoice_link import LINK_FIELD, QTY_FIELD, covering_invoices, window_invoices
-from fuelbuddy_crm.dn_validation import so_headroom_shortfalls
+from fuelbuddy_crm.dn_validation import qty_by_so_line, so_headroom_shortfalls
 from fuelbuddy_crm.dn_versioning import QC_IDEMPOTENCY_KEY_FIELD as KEY_FIELD
 
 LOG_DOCTYPE = "DN Amend Log"
@@ -255,8 +256,10 @@ def _amend_submitted(doc, target, key, so_lines):
 		return _ok(CANCELLED, _("Delivery Note {0} cancelled").format(doc.name))
 
 	amendment = _build_amendment(doc, lines, key)
-	# Checked on the reissue's FULL quantity, after the cancel freed the original's: other live
-	# drafts may have taken the headroom since, so even a reduction can be refused.
+	# Only what the reissue grows is checked: a line it keeps at or below the original's qty passes
+	# however over-booked (the cancel gave that qty back, the reissue takes it again); a grown or
+	# spill-over line is checked on its full qty against what the cancel left, i.e. on the growth.
+	# The validate hook applies the same rule (qc_replaced_qty, see so_headroom_shortfalls).
 	_refuse_on_headroom(amendment)
 	amendment.insert()
 	amendment.submit()
@@ -280,6 +283,7 @@ def _build_amendment(original, lines, key):
 	amendment.posting_time = original.posting_time
 	amendment.set(KEY_FIELD, key)
 	amendment.flags.qc_idempotency_key = key  # drop_copied_idempotency_key keeps it
+	amendment.flags.qc_replaced_qty = qty_by_so_line(original)  # so_headroom_shortfalls
 	amendment.set(LINK_FIELD, None)
 	amendment.set(QTY_FIELD, 0)
 

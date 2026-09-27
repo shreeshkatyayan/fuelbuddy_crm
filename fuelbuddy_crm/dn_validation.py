@@ -141,7 +141,9 @@ def enforce_so_headroom(doc, method=None):
 	merely being submitted consumes nothing new and passes. That last case matters: the
 	site is sitting on a ~55k draft-DN backlog, ~17k of which already over-subscribe their
 	Sales Order; this guard exists to stop NEW over-punching, not to wedge the drain.
-	Returns are negative-qty companion docs and are never capped."""
+	A quantity-correction reissue is checked only on the lines it grows past the Delivery
+	Note it replaces (so_headroom_shortfalls). Returns are negative-qty companion docs and
+	are never capped."""
 	for short in so_headroom_shortfalls(doc):
 		so_item = short.so_item
 		frappe.throw(
@@ -163,6 +165,16 @@ def enforce_so_headroom(doc, method=None):
 		)
 
 
+def qty_by_so_line(doc):
+	"""{so_detail: qty} this Delivery Note holds, in memory, per Sales Order line (in the line's
+	transaction UOM)."""
+	qty = {}
+	for row in doc.items:
+		if row.get("so_detail"):
+			qty[row.so_detail] = qty.get(row.so_detail, 0) + flt(row.qty)
+	return qty
+
+
 def so_headroom_shortfalls(doc):
 	"""The SO lines this Delivery Note, as it stands in memory, would over-consume — the check
 	enforce_so_headroom throws on, returned instead of thrown so the quantity-correction amend
@@ -171,21 +183,26 @@ def so_headroom_shortfalls(doc):
 	What a line has left is `qty - delivered_qty - drafts`. No `+ returned_qty`: ERPNext's
 	delivered_qty is already net of submitted returns (its status updater sums every submitted
 	Delivery Note Item on the line, and a return's rows carry the line with a negative qty), so
-	adding returned_qty back frees a returned litre twice."""
+	adding returned_qty back frees a returned litre twice.
+
+	A quantity-correction reissue carries `doc.flags.qc_replaced_qty` ({so_detail: qty}, see
+	qty_by_so_line): what the submitted Delivery Note it replaces held, cancelled earlier in the
+	same transaction. A line the reissue does not grow past that is never refused, however
+	over-booked the line is: a reduction always goes through (IDEV-3266). A line it grows, or a
+	new one, is checked as usual: its full qty against what the line has left after the cancel
+	gave back the original's, which is the growth against what it had left before."""
 	if doc.get("is_return"):
 		return []
 
-	wanted = {}
-	for row in doc.items:
-		if row.get("so_detail"):
-			wanted[row.so_detail] = wanted.get(row.so_detail, 0) + flt(row.qty)
-
+	replaced = doc.flags.get("qc_replaced_qty") or {}
 	shortfalls = []
-	for so_detail, punching in wanted.items():
+	for so_detail, punching in qty_by_so_line(doc).items():
 		increase = punching - _own_drafted_qty(doc.name, so_detail)
 		# 0.001 slack: qty is a Float and litres/conversion_factor rarely divides evenly.
 		if increase <= 0.001:
 			continue  # consuming nothing new (submit of an existing draft, or a reduction)
+		if so_detail in replaced and punching - flt(replaced[so_detail]) <= 0.001:
+			continue  # a reissue line no larger than the cancelled original's
 
 		so_item = frappe.db.get_value(
 			"Sales Order Item",
