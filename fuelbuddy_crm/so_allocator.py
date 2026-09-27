@@ -78,14 +78,15 @@ def build_sales_order_query(customer, billing_address, reference_date):
 def remaining_litres(so_item):
 	"""Remaining undelivered quantity on a Sales Order line, in LITRES.
 
-	remaining(txn)    = qty - delivered_qty - custom_delivery_note_qty_in_draft + returned_qty
-	remaining(litres) = remaining(txn) * conversion_factor"""
+	remaining(txn)    = qty - delivered_qty - custom_delivery_note_qty_in_draft
+	remaining(litres) = remaining(txn) * conversion_factor
+
+	returned_qty is not added back: delivered_qty is already net of submitted returns."""
 	qty = _number(so_item.get("qty"), 0)
 	delivered = _number(so_item.get("delivered_qty"), 0)
 	draft = _number(so_item.get("custom_delivery_note_qty_in_draft"), 0)
-	returned = _number(so_item.get("returned_qty"), 0)
 	conversion_factor = _number(so_item.get("conversion_factor"), 1)
-	remaining_txn = qty - delivered - draft + returned
+	remaining_txn = qty - delivered - draft
 	return remaining_txn * conversion_factor
 
 

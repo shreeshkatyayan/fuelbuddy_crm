@@ -375,7 +375,6 @@ def _delta_candidates(doc):
 				"discount_amount",
 				"qty",
 				"delivered_qty",
-				"returned_qty",
 				"custom_delivery_note_qty_in_draft",
 			],
 			order_by="idx asc",

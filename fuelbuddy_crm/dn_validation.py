@@ -80,7 +80,7 @@ def sync_draft_reservation(doc, method=None):
 	draft Delivery Notes.
 
 	The allocator (erp-functions `remainingLitres`) computes headroom as
-	`qty - delivered_qty - custom_delivery_note_qty_in_draft + returned_qty`, so a draft
+	`qty - delivered_qty - custom_delivery_note_qty_in_draft`, so a draft
 	DN that doesn't reserve is invisible and the next punch sees the full order again.
 
 	This replaces the "Sales Order updated with Draft qty of delivery note" Server Script,
@@ -166,7 +166,12 @@ def enforce_so_headroom(doc, method=None):
 def so_headroom_shortfalls(doc):
 	"""The SO lines this Delivery Note, as it stands in memory, would over-consume — the check
 	enforce_so_headroom throws on, returned instead of thrown so the quantity-correction amend
-	can refuse with SO_HEADROOM before it saves. Empty when everything fits."""
+	can refuse with SO_HEADROOM before it saves. Empty when everything fits.
+
+	What a line has left is `qty - delivered_qty - drafts`. No `+ returned_qty`: ERPNext's
+	delivered_qty is already net of submitted returns (its status updater sums every submitted
+	Delivery Note Item on the line, and a return's rows carry the line with a negative qty), so
+	adding returned_qty back frees a returned litre twice."""
 	if doc.get("is_return"):
 		return []
 
@@ -185,14 +190,14 @@ def so_headroom_shortfalls(doc):
 		so_item = frappe.db.get_value(
 			"Sales Order Item",
 			so_detail,
-			["parent", "item_code", "qty", "delivered_qty", "returned_qty", "uom"],
+			["parent", "item_code", "qty", "delivered_qty", "uom"],
 			as_dict=True,
 		)
 		if not so_item:
 			continue  # dangling link; enforce_single_active_dn / ERPNext handle that
 
 		drafted = _drafted_qty(so_detail)
-		available = flt(so_item.qty) - flt(so_item.delivered_qty) + flt(so_item.returned_qty) - drafted
+		available = flt(so_item.qty) - flt(so_item.delivered_qty) - drafted
 		if increase - available > 0.001:
 			shortfalls.append(
 				frappe._dict(

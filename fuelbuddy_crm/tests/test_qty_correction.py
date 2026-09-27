@@ -449,6 +449,30 @@ class TestAmendRefusals(QtyCorrectionTestCase):
 		self.assertUntouched(dn)
 
 
+class TestSalesOrderHeadroom(QtyCorrectionTestCase):
+	"""What a Sales Order line has left (IDEV-3266)."""
+
+	def test_a_return_frees_its_qty_once(self):
+		"""ERPNext takes a submitted return off delivered_qty and also records it in returned_qty;
+		what the line has left counts it once."""
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+		so = self.so(1000)
+		dn = self.dn([(so, 1000)], submit=True)
+		ret = make_sales_return(dn.name)
+		ret.items[0].qty = -100
+		ret.posting_date = "2026-08-16"
+		ret.set_posting_time = 1
+		ret.insert()
+		ret.submit()
+		self.assertEqual((self.soi(so, "delivered_qty"), self.soi(so, "returned_qty")), (900, 100))
+
+		punch = self.dn([(so, 100)])  # exactly what the return gave back
+		punch.items[0].qty = 150
+		(short,) = so_headroom_shortfalls(punch)
+		self.assertEqual((short.increase, short.available), (50, 0))
+
+
 class TestAmendErrorMapping(QtyCorrectionTestCase):
 	"""Exceptions raised inside the transaction map to codes and roll back."""
 

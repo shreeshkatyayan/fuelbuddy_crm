@@ -42,7 +42,9 @@ const remainingCases = [
   { name: 'numeric strings, blanks and nulls', soItem: { qty: '1200.5', delivered_qty: '', custom_delivery_note_qty_in_draft: null, returned_qty: '3', conversion_factor: '4.546' } },
   { name: 'over-subscribed line is negative', soItem: { qty: 100, delivered_qty: 80, custom_delivery_note_qty_in_draft: 40, conversion_factor: 1 } },
   { name: 'unparseable values count as zero / factor 1', soItem: { qty: 'abc', delivered_qty: 'x', conversion_factor: 'IG' } },
-  { name: 'fractional litres', soItem: { qty: 5000.123, delivered_qty: 1234.567, custom_delivery_note_qty_in_draft: 0.001, returned_qty: 0.5, conversion_factor: 1 } }
+  { name: 'fractional litres', soItem: { qty: 5000.123, delivered_qty: 1234.567, custom_delivery_note_qty_in_draft: 0.001, returned_qty: 0.5, conversion_factor: 1 } },
+  // 400 delivered, then a 100 return submitted: ERPNext shows delivered 300 (net) and returned 100
+  { name: 'a return frees its qty once (delivered_qty is already net of it)', soItem: { qty: 10000, delivered_qty: 300, custom_delivery_note_qty_in_draft: 0, returned_qty: 100, conversion_factor: 1 } }
 ]
 
 const allocateCases = [
@@ -53,7 +55,8 @@ const allocateCases = [
   { name: 'imperial gallon line capacity in litres', dispensedLitres: 5000, candidates: [cand('SO-IG', igItem('soi-ig', 1000, { delivered_qty: 100 })), cand('SO-L', soItem('soi-l', 10000))] },
   { name: 'nothing to allocate', dispensedLitres: 0, candidates: [cand('SO-A', soItem('soi-a', 1000))] },
   { name: 'dust leftover rounds to zero', dispensedLitres: 1000.0000000001, candidates: [cand('SO-A', soItem('soi-a', 1000))] },
-  { name: 'no candidates', dispensedLitres: 50, candidates: [] }
+  { name: 'no candidates', dispensedLitres: 50, candidates: [] },
+  { name: 'a returned qty is not freed twice', dispensedLitres: 300, candidates: [cand('SO-A', soItem('soi-a', 1000, { delivered_qty: 900, returned_qty: 100 })), cand('SO-B', soItem('soi-b', 1000))] }
 ]
 
 const reconcileCases = [
@@ -67,6 +70,7 @@ const reconcileCases = [
   { name: 'increase past every SO leaves leftover', existingLines: [line('SO-A', 'soi-a', 1000)], newQtyLitres: 2000, deltaCandidates: [cand('SO-A', soItem('soi-a', 1200, { delivered_qty: 1000 })), cand('SO-B', soItem('soi-b', 300))] },
   { name: 'increase skips a full SO', existingLines: [line('SO-A', 'soi-a', 1000)], newQtyLitres: 1100, deltaCandidates: [cand('SO-A', soItem('soi-a', 1000, { delivered_qty: 1000 })), cand('SO-B', soItem('soi-b', 1000))] },
   { name: 'imperial gallon last line grows in gallons, spills onto a litre SO', existingLines: [igLine('SO-IG', 'soi-ig', 100)], newQtyLitres: 1000, deltaCandidates: [cand('SO-IG', igItem('soi-ig', 150, { delivered_qty: 100 })), cand('SO-L', soItem('soi-l', 10000))] },
+  { name: 'increase on a line with a return takes the returned qty once, then spills', existingLines: [line('SO-A', 'soi-a', 800)], newQtyLitres: 1100, deltaCandidates: [cand('SO-A', soItem('soi-a', 1000, { delivered_qty: 900, returned_qty: 100 })), cand('SO-B', soItem('soi-b', 1000))] },
   { name: 'spill onto an imperial gallon SO', existingLines: [line('SO-A', 'soi-a', 1000)], newQtyLitres: 1454.6, deltaCandidates: [cand('SO-A', soItem('soi-a', 1000, { delivered_qty: 1000 })), cand('SO-IG', igItem('soi-ig', 500))] },
   { name: 'no lines', existingLines: [], newQtyLitres: 10, deltaCandidates: [] }
 ]

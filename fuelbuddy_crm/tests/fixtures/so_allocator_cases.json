@@ -2,9 +2,9 @@
 	"_meta": {
 		"purpose": "Shared cases for the SO allocator. erp-functions (JS) is the source; fuelbuddy_crm/so_allocator.py (Python) must reproduce every expected value.",
 		"generated_by": "_shared/gen_so_allocator_cases.mjs (node v26.8.1)",
-		"erp_functions_commit": "14fbfac05782bc46906d0e2c958902d459ecf03b",
+		"erp_functions_commit": "92970f690eef3079890cb420af1101566443d102",
 		"source_blobs": {
-			"src/erp/allocateSalesOrders.js": "c56fd96bd996ea833c52ac8234efac792b2c1d5a",
+			"src/erp/allocateSalesOrders.js": "ac7b355e25c907769c8950170882ffd65a635ae2",
 			"src/erp/reconcileDeliveryNoteLines.js": "9001ee5ba061b3361a8b8bb6bae6bde2c5ee11b3",
 			"src/erp/createDeliveryNote.js": "b34af55235df1afb027bd3819ede70fbc9e8c22b",
 			"src/lib/utils/deliveryNote.util.js": "2426cadea5a235eb54d75b1dba3b20c803188e22"
@@ -125,7 +125,7 @@
 				"returned_qty": 10,
 				"conversion_factor": 4.546
 			},
-			"expected": 3452.6870000000004
+			"expected": 3407.2270000000003
 		},
 		{
 			"name": "missing bookkeeping fields count as zero",
@@ -152,7 +152,7 @@
 				"returned_qty": "3",
 				"conversion_factor": "4.546"
 			},
-			"expected": 5471.111
+			"expected": 5457.473
 		},
 		{
 			"name": "over-subscribed line is negative",
@@ -182,7 +182,18 @@
 				"returned_qty": 0.5,
 				"conversion_factor": 1
 			},
-			"expected": 3766.0549999999994
+			"expected": 3765.5549999999994
+		},
+		{
+			"name": "a return frees its qty once (delivered_qty is already net of it)",
+			"soItem": {
+				"qty": 10000,
+				"delivered_qty": 300,
+				"custom_delivery_note_qty_in_draft": 0,
+				"returned_qty": 100,
+				"conversion_factor": 1
+			},
+			"expected": 9700
 		}
 	],
 	"allocate": [
@@ -574,6 +585,67 @@
 			"expected": {
 				"allocations": [],
 				"leftover": 50
+			}
+		},
+		{
+			"name": "a returned qty is not freed twice",
+			"dispensedLitres": 300,
+			"candidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 900,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 100
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"allocations": [
+					{
+						"so": "SO-A",
+						"so_detail": "soi-a",
+						"allocatedLitres": 100
+					},
+					{
+						"so": "SO-B",
+						"so_detail": "soi-b",
+						"allocatedLitres": 200
+					}
+				],
+				"leftover": 0
 			}
 		}
 	],
@@ -1141,6 +1213,85 @@
 						"against_sales_order": "SO-L",
 						"so_detail": "soi-l",
 						"qty": 318.09999999999997,
+						"uom": "Litre",
+						"conversion_factor": 1
+					}
+				]
+			}
+		},
+		{
+			"name": "increase on a line with a return takes the returned qty once, then spills",
+			"existingLines": [
+				{
+					"item_code": "FB/FL/00001",
+					"against_sales_order": "SO-A",
+					"so_detail": "soi-a",
+					"qty": 800,
+					"uom": "Litre",
+					"conversion_factor": 1,
+					"rate": 3.51,
+					"custom_customer_asset": "ASSET-1"
+				}
+			],
+			"newQtyLitres": 1100,
+			"deltaCandidates": [
+				{
+					"so": {
+						"name": "SO-A"
+					},
+					"soItem": {
+						"name": "soi-a",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 900,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 100
+					}
+				},
+				{
+					"so": {
+						"name": "SO-B"
+					},
+					"soItem": {
+						"name": "soi-b",
+						"item_code": "FB/FL/00001",
+						"item_name": "Diesel",
+						"uom": "Litre",
+						"conversion_factor": 1,
+						"rate": 3.51,
+						"price_list_rate": 3.51,
+						"discount_percentage": 0,
+						"discount_amount": 0,
+						"qty": 1000,
+						"delivered_qty": 0,
+						"custom_delivery_note_qty_in_draft": 0,
+						"returned_qty": 0
+					}
+				}
+			],
+			"expected": {
+				"changed": true,
+				"error": null,
+				"leftover": 0,
+				"lines": [
+					{
+						"against_sales_order": "SO-A",
+						"so_detail": "soi-a",
+						"qty": 900,
+						"uom": "Litre",
+						"conversion_factor": 1
+					},
+					{
+						"against_sales_order": "SO-B",
+						"so_detail": "soi-b",
+						"qty": 200,
 						"uom": "Litre",
 						"conversion_factor": 1
 					}
