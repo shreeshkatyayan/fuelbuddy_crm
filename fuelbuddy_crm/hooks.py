@@ -346,6 +346,11 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
         "before_insert": "fuelbuddy_crm.dn_versioning.set_amended_version",
+        # billing_recheck.line_guard.check (IDEV-3268): with the billing re-check switched on, take the
+        # Sales Order line lock before the event writes anything and refuse (TimestampMismatchError,
+        # retryable) when this request's snapshot misses a billing event committed on the line.
+        "before_submit": "fuelbuddy_crm.billing_recheck.line_guard.check",
+        "before_cancel": "fuelbuddy_crm.billing_recheck.line_guard.check",
         # Keep Sales Order Item.custom_delivery_note_qty_in_draft (which the allocator
         # subtracts from the SO headroom) in step with the live draft DNs -- including
         # RELEASING it on cancel/delete, which the old Server Script never did.
@@ -405,7 +410,12 @@ doc_events = {
         # before_save runs after the live DN-qty-rewrite Server Script (validate),
         # before_submit re-applies against the final submitted quantities.
         "before_save": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_save",
-        "before_submit": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_submit",
+        # billing_recheck.line_guard.check first (IDEV-3268): see the Delivery Note hooks above.
+        "before_submit": [
+            "fuelbuddy_crm.billing_recheck.line_guard.check",
+            "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_submit",
+        ],
+        "before_cancel": "fuelbuddy_crm.billing_recheck.line_guard.check",
         # DN -> Sales Invoice link: every save (draft, submit, allow-on-submit edits of the
         # DN window) re-allocates the DNs this invoice billed, writing only the ones whose link
         # or litres change; cancel/delete clears them. Both lock the SO line(s) first.

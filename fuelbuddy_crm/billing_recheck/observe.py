@@ -21,6 +21,7 @@ PATHS = (
 	"fallback_si_detail",
 	"guard_disabled",
 	"not_installed",
+	"stale_line",  # line_guard refused an event whose snapshot missed a committed event on its line
 )
 # the paths that run at stock cost: an Error Log when the Sales Order line is big (config.alert_rows)
 SLOW = frozenset({"fallback_multi_item", "fallback_si_detail", "guard_disabled", "not_installed"})

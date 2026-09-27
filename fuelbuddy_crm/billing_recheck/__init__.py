@@ -13,6 +13,8 @@ billing values while writing only what changes:
   runs the same check in CI / before a deploy);
 - install.py: patches each process from crm's before_request / before_job hooks; ``status()`` is the
   System Manager health check;
+- line_guard.py: with a switch on, a Delivery Note / Sales Invoice submit or cancel takes the Sales Order
+  line lock first and refuses (retryable) when its snapshot misses an event committed on the line;
 - config.py: the site_config.json switches (everything is off until they are set);
 - observe.py: per-path counters, logs and deferred alerts;
 - api.py: stock_would_change / recompute_line / header_drift / refresh_dns for the repair job and the

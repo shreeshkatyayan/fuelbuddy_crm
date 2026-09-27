@@ -25,7 +25,16 @@ HAVE_APPS = all(importlib.util.find_spec(app) for app in ("frappe", "erpnext"))
 if HAVE_APPS:
 	import frappe
 
-	from fuelbuddy_crm.billing_recheck import bulk, config, fingerprint, guard, install, observe, walk
+	from fuelbuddy_crm.billing_recheck import (
+		bulk,
+		config,
+		fingerprint,
+		guard,
+		install,
+		line_guard,
+		observe,
+		walk,
+	)
 
 
 def row(name, parent, billed_amt=0.0):
@@ -174,6 +183,82 @@ class TestWalkPaths(PathCase):
 		)
 		self.stock.assert_not_called()
 		self.assertEqual(self.counted, ["fifo"])
+
+
+class TestLineGuard(PathCase):
+	"""line_guard.check: lock the event's Sales Order lines, refuse when the snapshot is older."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.local.flags.mute_messages = True  # frappe.throw raises without building a message
+		patch = mock.patch.object(line_guard, "_", side_effect=lambda text: text)
+		patch.start()
+		self.addCleanup(patch.stop)
+
+	def doc(self, *so_details):
+		return frappe._dict(
+			doctype="Delivery Note", name="DN-1", items=[frappe._dict(so_detail=s) for s in so_details]
+		)
+
+	def answer(self, seen, latest):
+		"""frappe.db.sql answers: the snapshot read first, then the locking read."""
+		frappe.db.sql.side_effect = [seen, latest]
+
+	def soi(self, name, modified, delivered_qty=10.0):
+		return frappe._dict(name=name, modified=modified, delivered_qty=delivered_qty)
+
+	def test_switched_off_does_nothing(self):
+		self.conf()
+		line_guard.check(self.doc("SOI-1"))
+		frappe.db.sql.assert_not_called()
+
+	def test_no_sales_order_line_does_nothing(self):
+		self.conf(billing_recheck_walk=1)
+		line_guard.check(self.doc(None, ""))
+		frappe.db.sql.assert_not_called()
+
+	def test_skipped_under_the_drain_flag_and_migrate(self):
+		self.conf(billing_recheck_walk=1)
+		for flag in ("fb_skip_billing_status", "in_migrate", "in_install"):
+			with self.subTest(flag=flag):
+				frappe.local.flags[flag] = True
+				line_guard.check(self.doc("SOI-1"))
+				frappe.db.sql.assert_not_called()
+				frappe.local.flags[flag] = False
+
+	def test_unchanged_line_is_locked_and_passes(self):
+		self.conf(billing_recheck_walk=1)
+		self.answer(
+			[self.soi("SOI-1", "2026-09-01 10:00:00.000001")],
+			[self.soi("SOI-1", "2026-09-01 10:00:00.000001")],
+		)
+		line_guard.check(self.doc("SOI-1", None, "SOI-1"))
+		plain, locking = frappe.db.sql.call_args_list
+		self.assertNotIn("for update", plain.args[0])
+		self.assertTrue(locking.args[0].endswith("order by name for update"))
+		self.assertEqual(plain.args[1], {"names": ("SOI-1",)})
+		self.assertEqual(locking.args[1], {"names": ("SOI-1",)})
+		self.assertEqual(self.counted, [])
+
+	def test_line_changed_after_the_snapshot_refuses(self):
+		self.conf(billing_recheck_bulk_over=10)
+		seen = [self.soi("SOI-1", "2026-09-01 10:00:00.000001"), self.soi("SOI-2", "2026-09-01 11:00:00")]
+		latest = [
+			self.soi("SOI-1", "2026-09-01 10:00:00.500000", 30.0),
+			self.soi("SOI-2", "2026-09-01 11:00:00"),
+		]
+		self.answer(seen, latest)
+		with self.assertRaises(frappe.TimestampMismatchError) as ctx:
+			line_guard.check(self.doc("SOI-2", "SOI-1"))
+		self.assertIn("SOI-1", str(ctx.exception))
+		self.assertNotIn("SOI-2", str(ctx.exception))
+		self.assertEqual(frappe.db.sql.call_args_list[1].args[1], {"names": ("SOI-1", "SOI-2")})
+		self.assertEqual(self.counted, ["stale_line"])
+
+	def test_a_row_only_one_read_sees_is_stale(self):
+		self.conf(billing_recheck_walk=1)
+		self.answer([], [self.soi("SOI-1", "2026-09-01 10:00:00")])
+		self.assertEqual(line_guard.stale_lines(["SOI-1"]), ["SOI-1"])
 
 
 class TestReturnAddOn(PathCase):

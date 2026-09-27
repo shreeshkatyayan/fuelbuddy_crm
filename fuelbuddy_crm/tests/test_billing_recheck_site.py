@@ -20,7 +20,7 @@ from unittest import mock
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from fuelbuddy_crm.billing_recheck import bulk, config, guard, install, observe
+from fuelbuddy_crm.billing_recheck import bulk, config, guard, install, line_guard, observe
 from fuelbuddy_crm.billing_recheck import stock_refresh as sr
 from fuelbuddy_crm.tests import billing_recheck_fixtures as fx
 
@@ -253,6 +253,84 @@ class TestDriftAndRepair(BillingRecheckCase):
 		self.assertEqual(changed, [dns[0].name])
 		api.refresh_dns(sorted(set(changed) | {d["name"] for d in api.header_drift(fx.line_dns(lines))}))
 		self.assertFixpoint(lines)
+
+
+class TestLineGuardSite(BillingRecheckCase):
+	"""line_guard against a real second connection: a line committed after this transaction's snapshot
+	is refused; an unchanged line is locked until this transaction ends."""
+
+	def other_connection(self):
+		import pymysql
+
+		conf = frappe.conf
+		return pymysql.connect(
+			host=conf.get("db_host") or "127.0.0.1",
+			port=int(conf.get("db_port") or 3306),
+			user=conf.get("db_user") or conf.db_name,
+			password=conf.db_password,
+			database=conf.db_name,
+		)
+
+	def committed_line(self):
+		frappe.db.commit()  # nothing of this test's own may hold the row
+		line = frappe.db.sql_list("select name from `tabSales Order Item` order by creation limit 1")
+		if not line:
+			self.skipTest("no committed Sales Order Item row")
+		return line[0]
+
+	def doc(self, line):
+		return frappe._dict(doctype="Delivery Note", name="LG-TEST", items=[frappe._dict(so_detail=line)])
+
+	def test_line_committed_after_the_snapshot_is_refused(self):
+		line = self.committed_line()
+		frappe.db.sql("select modified from `tabSales Order Item` where name = %s", line)  # snapshot holds it
+		other, modified = self.other_connection(), None
+		try:
+			with other.cursor() as cur:
+				cur.execute("select modified from `tabSales Order Item` where name = %s", (line,))
+				modified = cur.fetchone()[0]
+				cur.execute(
+					"update `tabSales Order Item` set modified = modified + interval 1 second where name = %s",
+					(line,),
+				)
+			other.commit()
+			before = observe.counters().get("stale_line", 0)
+			with fx.switches(walk=1), self.assertRaises(frappe.TimestampMismatchError):
+				line_guard.check(self.doc(line))
+			self.assertEqual(observe.counters().get("stale_line", 0), before + 1)
+			with fx.switches():  # switched off: stock behaviour, no check
+				line_guard.check(self.doc(line))
+		finally:
+			frappe.db.rollback()
+			if modified is not None:
+				with other.cursor() as cur:
+					cur.execute(
+						"update `tabSales Order Item` set modified = %s where name = %s", (modified, line)
+					)
+				other.commit()
+			other.close()
+		# a fresh transaction's snapshot holds the committed change: no refusal
+		with fx.switches(walk=1):
+			line_guard.check(self.doc(line))
+		frappe.db.rollback()
+
+	def test_unchanged_line_passes_and_stays_locked(self):
+		import pymysql
+
+		line = self.committed_line()
+		with fx.switches(walk=1):
+			line_guard.check(self.doc(line))
+		other = self.other_connection()
+		try:
+			with other.cursor() as cur:
+				cur.execute("set session innodb_lock_wait_timeout = 1")
+				with self.assertRaises(pymysql.err.OperationalError) as ctx:
+					cur.execute("select name from `tabSales Order Item` where name = %s for update", (line,))
+				self.assertEqual(ctx.exception.args[0], 1205)  # lock wait timeout: we hold the line
+		finally:
+			frappe.db.rollback()
+			other.rollback()
+			other.close()
 
 
 class TestBulkRefreshEqualsStock(BillingRecheckCase):
