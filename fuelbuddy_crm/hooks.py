@@ -387,7 +387,12 @@ doc_events = {
         # Any invoice (manual or auto, even a Draft) advances the SO's
         # last-invoiced date so the auto-invoicing scheduler never re-bills a
         # period already covered (IDEV-3000).
-        "after_insert": "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+        # lock_so_lines first (IDEV-3268): update_so_last_invoiced writes the SO header, and a DN
+        # submit locks the SO line before the header, so the invoice takes the line first too.
+        "after_insert": [
+            "fuelbuddy_crm.dn_invoice_link.lock_so_lines",
+            "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
+        ],
         "on_submit": [
             "fuelbuddy_crm.auto_invoicing.update_so_last_invoiced",
             "fuelbuddy_crm.billing_recheck.install.count_not_installed",
@@ -402,7 +407,8 @@ doc_events = {
         "before_save": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_save",
         "before_submit": "fuelbuddy_crm.auto_invoicing.apply_manual_invoice_discount_submit",
         # DN -> Sales Invoice link: every save (draft, submit, allow-on-submit edits of the
-        # DN window) restamps the DNs this invoice billed; cancel/delete clears them.
+        # DN window) re-allocates the DNs this invoice billed, writing only the ones whose link
+        # or litres change; cancel/delete clears them. Both lock the SO line(s) first.
         "on_update": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_update_after_submit": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_cancel": [
@@ -422,5 +428,10 @@ scheduler_events = {
     },
     "monthly": [
         "fuelbuddy_crm.sales_automation.generate_monthly_contract_sales_orders",
+    ],
+    # IDEV-3268: read-only check that DN per_billed / status / billed_amt and the DN -> invoice
+    # links match what the code that owns them would write; Error Log "Billing drift: ..." if not.
+    "daily_long": [
+        "fuelbuddy_crm.billing_repair.nightly_drift_audit",
     ],
 }
