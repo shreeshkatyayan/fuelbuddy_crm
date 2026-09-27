@@ -54,7 +54,7 @@ DN = "Delivery Note"
 COMMENT = "Comment"
 NO_LABEL = ("Cancelled", "Partially Ordered", "Ordered", "Issued", "Transferred")  # set_status
 CONTENT_DISALLOWED_TAGS = ["form", "input", "button"]  # Comment.validate
-# every column of tabComment in frappe 15.99.0 / 15.113.1; any other column -> stock (gap_reasons)
+# every column of tabComment in frappe 15.99.0 / 15.113.1 / 15.121.1; any other column -> stock (gap_reasons)
 COMMENT_FIELDS = (
 	"name",
 	"creation",
@@ -96,7 +96,7 @@ SKIPPED_METHODS = {
 	),
 }
 # doc_events handlers that can resolve for SKIPPED_METHODS, each with the data check in _data_gaps()
-# that proves it a no-op (frappe 15.99.0 / 15.113.1, erpnext 15.96.0, frappe_whatsapp 1.0.x hooks)
+# that proves it a no-op (frappe 15.99.0 / 15.113.1 / 15.121.1, erpnext 15.96.0, frappe_whatsapp 1.0.x hooks)
 KNOWN_HOOKS = {
 	"frappe.social.doctype.energy_point_rule.energy_point_rule.process_energy_points": "energy_point_rule",
 	"frappe.automation.doctype.milestone_tracker.milestone_tracker.evaluate_milestone": "milestone_tracker",

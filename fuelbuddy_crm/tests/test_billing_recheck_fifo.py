@@ -35,8 +35,8 @@ PINNED = fp.load_pins()["erpnext"]["15.96.0"]["segments"]["delivery_note.update_
 
 
 def frappe_flt(s, precision=None, rounding_method=None):
-	"""frappe.utils.data.flt (15.99.0 / 15.113.1, fingerprinted as data.flt) without precision, the only
-	way the walk calls it."""
+	"""frappe.utils.data.flt (15.99.0 / 15.113.1 / 15.121.1, fingerprinted as data.flt) without precision,
+	the only way the walk calls it."""
 	assert precision is None
 	if isinstance(s, str):
 		s = s.replace(",", "")
