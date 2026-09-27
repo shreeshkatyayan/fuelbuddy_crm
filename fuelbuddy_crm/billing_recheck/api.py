@@ -55,7 +55,7 @@ def line_delivery_notes(so_detail):
 	)
 
 
-def stock_would_change(so_detail):
+def stock_would_change(so_detail, header=True):
 	"""{"so_detail", "predicted", "reason", "rows", "header"}.
 
 	``rows``: [{"name", "parent", "stored", "stock"}] for the Delivery Note Items whose billed_amt stock
@@ -63,7 +63,8 @@ def stock_would_change(so_detail):
 	2**23 is not drift). None when ``predicted`` is False: a Delivery Note with two rows on the line
 	(stock's order between them is undefined) or a row with si_detail (not modelled); recompute_line
 	then runs stock's walk. ``header``: header_drift of the line's Delivery Notes, from their stored
-	items (so recompute rows first when ``rows`` is not empty)."""
+	items (so recompute rows first when ``rows`` is not empty); None with ``header=False`` (the repair
+	job checks every Delivery Note's header in its own pass)."""
 	_require_guard()
 	line = walk.line_stats(so_detail)
 	out = {"so_detail": so_detail, "predicted": True, "reason": None, "rows": []}
@@ -77,7 +78,7 @@ def stock_would_change(so_detail):
 				out["rows"].append(
 					{"name": row.name, "parent": row.parent, "stored": row.billed_amt, "stock": value}
 				)
-	out["header"] = header_drift(line_delivery_notes(so_detail))
+	out["header"] = header_drift(line_delivery_notes(so_detail)) if header else None
 	return out
 
 

@@ -9,21 +9,18 @@ status that was already wrong; the re-check does not, so a DN that is stale toda
 after fuelbuddy_dubai's drain skipped the recompute) would stay stale. ``repair`` clears that
 backlog before the re-check is switched on; ``audit`` looks for new drift every night.
 
-"Stock" means what ERPNext's own code would write now:
+"Stock" means what ERPNext's own code would write now. Both checks are the billing re-check's
+(fuelbuddy_crm.billing_recheck.api), so there is one copy of stock's arithmetic, pinned by its
+upgrade guard:
 
-- billed_amt: the SO-line walk (erpnext delivery_note.update_billed_amount_based_on_so), asked of
-  the core module through the interface below. Without it, this check is skipped and says so.
-- per_billed: StockController.update_billing_percentage -> StatusUpdater._update_percent_field
-  (erpnext v15.96.0 stock_controller.py:1042-1063, status_updater.py:475-505):
-  round(sum(min(|ref|, |billed_amt|)) / sum(|ref|) * 100, 6) over the DN's items, 0 when
-  sum(|ref|) is 0; ref is ``amount``, or ``amount - returned_qty * rate`` when the DN's returned
-  value is below its amount. ``_PCT`` is stock's SQL expression (its ``having sum(abs(ref)) > 0``
-  written as a CASE, as it runs per DN in a GROUP BY), so MariaDB does the same DECIMAL
-  arithmetic; the choice of ref is Python float sums over the items in idx order, as in stock.
-- status: StatusUpdater.set_status (status_updater.py:184-228) over status_map["Delivery Note"]
-  (:84-93), read at run time, walked in reverse, the first condition that holds
-  (frappe.safe_eval) on the DN with that per_billed. A condition that is a method, or reads a
-  field that is not a column, makes the status "unknown" (not compared) rather than guessed.
+- billed_amt: ``api.stock_would_change(so_detail)``, the SO-line walk
+  (erpnext delivery_note.update_billed_amount_based_on_so) computed read-only.
+- per_billed / status: ``api.header_drift(names)``, what update_billing_percentage + set_status
+  would store from the DN's stored items (billing_recheck.stock_refresh).
+
+When the running ERPNext / frappe code is not the pinned code (api.GuardError), or a status rule
+cannot be evaluated from columns, the check cannot be exact: that phase is skipped, the report
+says why, and the nightly audit alerts.
 
 ``repair(dry_run=True)`` reports what differs. With dry_run off it takes each drifted SO line's
 lock and brings its billed_amt to stock (core ``recompute_line``), then refreshes the returned DNs
@@ -45,131 +42,54 @@ and never writes; its one Error Log goes through defer_insert. Scheduled daily o
 
 import importlib
 import json
-import re
 
 import frappe
-from frappe.utils import cint, flt, getdate, nowdate
+from frappe.utils import cint
 
-# Interface the IDEV-3268 core branch provides; imported defensively (``_core``), so this module
-# works, minus the billed_amt check, while it is absent.
+# The billing re-check's repair / audit interface (fuelbuddy_crm.billing_recheck.api), imported on
+# first use (``_core``) so this module loads without it in the SQLite tests. What this module uses:
 #
-#   stock_would_change(so_detail: str) -> list[tuple[str, str, float]] | None
-#       Read-only (plain reads, no writes, no locks): the Delivery Note Item rows on this SO line
-#       whose stored billed_amt differs from what ERPNext's walk would write now, as
-#       (dn_item, delivery_note, stock_billed_amt). [] when the line matches stock; None when it
-#       cannot tell exactly (upgrade guard tripped, or a line shape it hands to stock).
-#   recompute_line(so_detail: str, update_modified: bool = True) -> list[str]
-#       The contract of stock update_billed_amount_based_on_so: writes billed_amt so the line
-#       matches stock and returns the Delivery Notes the caller must refresh with
-#       update_billing_percentage. The caller holds the SO line lock.
-CORE_MODULE = "fuelbuddy_crm.billing_recheck.walk"
+#   stock_would_change(so_detail, header=False) -> {"predicted", "reason", "rows", ...}
+#       Read-only. ``rows``: [{"name", "parent", "stored", "stock"}] for the Delivery Note Items
+#       whose billed_amt stock's walk would change ([] when the line matches stock); None with
+#       ``predicted`` False for a line it hands to stock (a DN with two rows on it, si_detail rows).
+#   recompute_line(so_detail, update_modified=True) -> [DN names]
+#       Writes billed_amt so the line matches stock (stock's own walk on a line it hands to stock)
+#       and returns the Delivery Notes to refresh. The caller holds the SO line lock.
+#   header_drift(names) -> [{"name", "per_billed": (stored, stock), "status": (stored, stock)}]
+#       Read-only: the DNs whose stored per_billed / status differ from stock's refresh.
+#   GuardError: the running ERPNext / frappe code is not the pinned code (both reads raise it).
+CORE_MODULE = "fuelbuddy_crm.billing_recheck.api"
 
 LOG_TITLE = "Billing drift"
 SAMPLE = 20
-
-REF_AMOUNT = "amount"
-REF_NET = "(amount - (returned_qty * rate))"
-# stock's per_billed: round(ifnull((select <this> ... having sum(abs(ref)) > 0), 0), 6)
-_PCT = (
-	"round(ifnull(case when sum(abs({ref})) > 0 then "
-	"ifnull(sum(case when abs({ref}) > abs(billed_amt) then abs(billed_amt) else abs({ref}) end), 0)"
-	" / sum(abs({ref})) * 100 end, 0), 6)"
-)
 
 
 def logger():
 	return frappe.logger("billing_recheck", allow_site=True)
 
 
+def _core():
+	return importlib.import_module(CORE_MODULE)
+
+
+class NotCheckable(Exception):
+	"""The stock values cannot be computed exactly here (see the module docstring)."""
+
+
 # ---- what stock would write --------------------------------------------------------------------
-def _dn_status_rules():
-	from erpnext.controllers.status_updater import status_map
-
-	return status_map["Delivery Note"]
-
-
-def stock_status(doc, rules):
-	"""The status StatusUpdater.set_status picks for ``doc`` (a frappe._dict of DN fields), or None
-	when a rule cannot be evaluated from those fields."""
-	context = {"self": doc, "getdate": getdate, "nowdate": nowdate, "get_value": frappe.db.get_value}
-	for status, condition in reversed(rules):
-		if not condition:
-			return status
-		if not condition.startswith("eval:"):
-			return None  # a controller method: not evaluable from stored fields
-		if frappe.safe_eval(condition[5:], None, context):
-			return status
-	return None
-
-
-def _status_fields(rules):
-	"""The DN columns the status rules read, or None when one is not a column."""
-	fields = {"status", "docstatus"}
-	for _status, condition in rules:
-		fields.update(re.findall(r"self\.(\w+)", condition or ""))
-	if not all(frappe.db.has_column("Delivery Note", f) for f in fields):
-		return None
-	return sorted(fields)
-
-
 def dn_drift(names):
-	"""Read-only. The submitted DNs among ``names`` whose stored per_billed or status differs from
-	what stock's refresh would write now: [{name, per_billed: (stored, stock), status: (stored,
-	stock)}]; a status of None on the stock side means "not evaluable" and is not compared."""
-	return [
-		d
-		for d in stock_billing(names)
-		if d.per_billed[0] != d.per_billed[1] or (d.status[1] is not None and d.status[0] != d.status[1])
-	]
-
-
-def stock_billing(names):
-	"""Read-only. For each submitted DN among ``names``: {name, per_billed: (stored, stock),
-	status: (stored, stock)}, stock being what update_billing_percentage + set_status would write."""
+	"""Read-only. The DNs among ``names`` whose stored per_billed or status differs from what stock's
+	refresh would write now: [{name, per_billed: (stored, stock), status: (stored, stock)}].
+	Raises NotCheckable when that cannot be computed exactly."""
 	if not names:
 		return []
-	names = list(names)
-	rules = _dn_status_rules()
-	fields = _status_fields(rules)
-	cols = ", ".join(f"`{f}`" for f in sorted({*(fields or ()), "per_billed", "status"}))
-	parents = frappe.db.sql(
-		f"select name, {cols} from `tabDelivery Note` where name in %(names)s and docstatus = 1 order by name",
-		{"names": names},
-		as_dict=True,
-	)
-	pct = {
-		r.parent: r
-		for r in frappe.db.sql(
-			f"""select parent, {_PCT.format(ref=REF_AMOUNT)} as by_amount, {_PCT.format(ref=REF_NET)} as by_net
-			from `tabDelivery Note Item` where parent in %(names)s and parenttype = 'Delivery Note'
-			group by parent""",
-			{"names": names},
-			as_dict=True,
-		)
-	}
-	totals = {}
-	for r in frappe.db.sql(
-		"""select parent, amount, returned_qty, rate from `tabDelivery Note Item`
-		where parent in %(names)s and parenttype = 'Delivery Note' order by parent, idx""",
-		{"names": names},
-		as_dict=True,
-	):
-		t = totals.setdefault(r.parent, [0, 0])  # stock: total_amount, total_returned
-		t[0] += flt(r.amount)
-		t[1] += flt(flt(r.returned_qty) * flt(r.rate))
-
-	out = []
-	for p in parents:
-		total_amount, total_returned = totals.get(p.name, (0, 0))
-		row = pct.get(p.name)
-		per_billed = flt((row.by_net if total_returned < total_amount else row.by_amount) if row else 0)
-		status = None
-		if fields is not None:
-			status = stock_status(frappe._dict({f: p.get(f) for f in fields}, per_billed=per_billed), rules)
-		out.append(
-			frappe._dict(name=p.name, per_billed=(flt(p.per_billed), per_billed), status=(p.status, status))
-		)
-	return out
+	core = _core()
+	try:
+		drift = core.header_drift(list(names))
+	except (core.GuardError, ValueError) as exc:  # ValueError: a status rule not evaluable
+		raise NotCheckable(f"{type(exc).__name__}: {exc}"[:300]) from exc
+	return [frappe._dict(d) for d in drift]
 
 
 # ---- scope -------------------------------------------------------------------------------------
@@ -219,17 +139,6 @@ def _lines(from_date, to_date, so_details):
 	)
 
 
-def _core():
-	"""The core branch's interface module (CORE_MODULE), or None while it is not installed."""
-	try:
-		module = importlib.import_module(CORE_MODULE)
-	except ImportError:
-		return None
-	if not all(callable(getattr(module, fn, None)) for fn in ("stock_would_change", "recompute_line")):
-		return None
-	return module
-
-
 # ---- repair ------------------------------------------------------------------------------------
 def repair(
 	dry_run=True,
@@ -268,18 +177,22 @@ def repair(
 
 def _line_phase(dry_run, from_date, to_date, so_details, chunk_size, sample, refreshed, failures):
 	core = _core()
-	if core is None:
-		return {"skipped": f"{CORE_MODULE}.stock_would_change / recompute_line not available"}
 	res = {"checked": 0, "drifted": 0, "rows": 0, "unknown": 0, "samples": [], "unknown_lines": []}
 	for so_detail in _lines(from_date, to_date, so_details):
-		res["checked"] += 1
-		rows = core.stock_would_change(so_detail)
+		try:
+			found = core.stock_would_change(so_detail, header=False)
+		except core.GuardError as exc:  # the same for every line: stop here
+			frappe.db.rollback()
+			res["skipped"] = f"upgrade guard: {exc}"[:300]
+			return res
 		frappe.db.rollback()  # end the read snapshot; stock_would_change writes nothing
-		if rows is None:
+		res["checked"] += 1
+		if not found["predicted"]:  # a line stock's own walk handles; recompute_line would run it
 			res["unknown"] += 1
 			if len(res["unknown_lines"]) < sample:
-				res["unknown_lines"].append(so_detail)
+				res["unknown_lines"].append({"so_detail": so_detail, "reason": found["reason"]})
 			continue
+		rows = found["rows"]
 		if not rows:
 			continue
 		res["drifted"] += 1
@@ -306,9 +219,14 @@ def _dn_phase(dry_run, from_date, to_date, so_details, chunk_size, page_size, sa
 	if not dry_run:
 		res.update(fixed=0, still_different=0, still_samples=[])
 	for names in _dn_pages(from_date, to_date, so_details, page_size):
-		res["checked"] += len(names)
-		drift = dn_drift(names)
+		try:
+			drift = dn_drift(names)
+		except NotCheckable as exc:  # the same for every page: stop here
+			frappe.db.rollback()
+			res["skipped"] = str(exc)
+			return res
 		frappe.db.rollback()  # end the read snapshot
+		res["checked"] += len(names)
 		res["drifted"] += len(drift)
 		for d in drift:
 			res["per_billed" if d.per_billed[0] != d.per_billed[1] else "status_only"] += 1
@@ -372,17 +290,25 @@ def _link_audit(sample):
 
 def nightly_drift_audit():
 	"""scheduler_events daily_long: run audit(), log a one-line summary, and write one Error Log
-	(deferred, so outside any transaction) when anything differs."""
+	(deferred, so outside any transaction) when anything differs or a check could not run."""
 	report = audit()
 	line = summary(report)
 	logger().info(f"billing drift audit: {line}")
-	if has_drift(report):
+	if has_drift(report) or not_checked(report):
 		frappe.log_error(
 			title=f"{LOG_TITLE}: {line}"[:140],
 			message=json.dumps(report, indent=1, default=str),
 			defer_insert=True,
 		)
 	return report
+
+
+def not_checked(report):
+	"""The phases that were meant to run but could not check exactly (upgrade guard, status rules);
+	``lines=0`` is a choice, not a failure."""
+	return [
+		key for key in ("lines", "dns") if (report.get(key) or {}).get("skipped") not in (None, "lines=0")
+	]
 
 
 def has_drift(report):
@@ -397,15 +323,18 @@ def has_drift(report):
 
 def summary(report):
 	dns, lines = report.get("dns") or {}, report.get("lines") or {}
-	parts = [f"{dns.get('drifted', 0)} of {dns.get('checked', 0)} DNs differ"]
+	if "skipped" in dns:
+		parts = [f"per_billed / status not checked ({dns['skipped']})"]
+	else:
+		parts = [f"{dns.get('drifted', 0)} of {dns.get('checked', 0)} DNs differ"]
 	if dns.get("per_billed") or dns.get("status_only"):
 		parts[-1] += f" ({dns.get('per_billed', 0)} per_billed, {dns.get('status_only', 0)} status only)"
 	if "skipped" in lines:
-		parts.append("billed_amt not checked")
+		parts.append(f"billed_amt not checked ({lines['skipped']})")
 	else:
 		parts.append(f"{lines.get('drifted', 0)} of {lines.get('checked', 0)} SO lines differ")
-		if lines.get("unknown"):
-			parts.append(f"{lines['unknown']} lines not checkable")
+	if lines.get("unknown"):
+		parts.append(f"{lines['unknown']} lines left to stock's walk")
 	for key, check in (report.get("links") or {}).items():
 		if check.get("count"):
 			parts.append(f"{check['count']} {key}")

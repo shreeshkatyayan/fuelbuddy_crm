@@ -5,10 +5,11 @@
 
     bench --site <site> run-tests --module fuelbuddy_crm.tests.test_billing_repair_site
 
-- The per_billed / status billing_repair predicts equal what ERPNext's own
-  update_billing_percentage(update_modified=True) writes, on real Delivery Notes of every kind
-  (plain, partly returned, returns, Closed): each sampled DN is refreshed with stock's code inside
-  the test transaction, compared, and everything is rolled back.
+- The per_billed / status billing_repair predicts (billing_recheck.stock_refresh, which
+  api.header_drift uses) equal what ERPNext's own update_billing_percentage(update_modified=True)
+  writes, on real Delivery Notes of every kind (plain, partly returned, returns, Closed): each
+  sampled DN is refreshed with stock's code inside the test transaction, compared, and everything
+  is rolled back; the repair's drift check then finds nothing on them.
 - A dry-run repair, audit() and audit_links() issue no write statement on MariaDB.
 
 Nothing is committed: every test rolls back.
@@ -19,6 +20,8 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days
 
 from fuelbuddy_crm import billing_repair, dn_invoice_link
+from fuelbuddy_crm.billing_recheck import api
+from fuelbuddy_crm.billing_recheck import stock_refresh as sr
 
 WRITES = ("update", "insert", "delete")
 
@@ -61,7 +64,11 @@ class TestBillingRepairSite(FrappeTestCase):
 
 	def test_prediction_equals_stock_refresh(self):
 		names = self.sample()
-		predicted = {d.name: d for d in billing_repair.stock_billing(names)}
+		per_billed = sr.stock_per_billed(names)
+		predicted = {
+			name: (per_billed[name], status)
+			for name, (_stored, status) in sr.statuses(names, per_billed=per_billed).items()
+		}
 		self.assertEqual(sorted(predicted), names)
 		for name in names:
 			frappe.get_doc("Delivery Note", name).update_billing_percentage(update_modified=True)
@@ -74,18 +81,14 @@ class TestBillingRepairSite(FrappeTestCase):
 			)
 		)
 		mismatches = [
-			(
-				name,
-				predicted[name].per_billed[1],
-				after[name].per_billed,
-				predicted[name].status[1],
-				after[name].status,
-			)
+			(name, *predicted[name], after[name].per_billed, after[name].status)
 			for name in names
-			if predicted[name].per_billed[1] != after[name].per_billed
-			or (predicted[name].status[1] is not None and predicted[name].status[1] != after[name].status)
+			if predicted[name] != (after[name].per_billed, after[name].status)
 		]
 		self.assertEqual(mismatches, [])
+		# and the repair's own check, through the billing re-check's interface, finds nothing left
+		self.assertEqual(billing_repair.dn_drift(names), [])
+		self.assertEqual(api.header_drift(names), [])
 
 	def test_dry_run_and_audit_write_nothing(self):
 		latest = frappe.db.sql("select max(posting_date) from `tabDelivery Note` where docstatus = 1")[0][0]
@@ -98,6 +101,22 @@ class TestBillingRepairSite(FrappeTestCase):
 		report, writes = self.watch_writes(billing_repair.audit, **week)
 		self.assertEqual(writes, [])
 		self.assertEqual(set(report.links), {"linked_not_submitted", "linked_to_dead_invoice", "over_linked"})
+
+	def test_line_check_through_the_core_writes_nothing(self):
+		"""The billed_amt pass (api.stock_would_change per SO line) on the smallest invoiced lines."""
+		lines = frappe.db.sql_list(
+			"""select dni.so_detail from `tabDelivery Note Item` dni
+			join `tabDelivery Note` dn on dn.name = dni.parent and dn.docstatus = 1 and dn.is_return = 0
+			where ifnull(dni.so_detail, '') != '' and exists (select 1 from `tabSales Invoice Item` sii
+				where sii.so_detail = dni.so_detail and sii.docstatus = 1)
+			group by dni.so_detail order by count(*) limit 3"""
+		)
+		if not lines:
+			self.skipTest("no invoiced Sales Order lines with Delivery Notes on this site")
+		report, writes = self.watch_writes(billing_repair.repair, so_details=lines)
+		self.assertEqual(writes, [])
+		self.assertNotIn("skipped", report.lines)
+		self.assertEqual(report.lines["checked"], len(lines))
 
 	def test_audit_links_runs_on_mariadb(self):
 		if not frappe.db.has_column("Delivery Note", dn_invoice_link.LINK_FIELD):

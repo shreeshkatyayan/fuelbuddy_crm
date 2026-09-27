@@ -30,7 +30,8 @@ create table `tabDelivery Note` (
 	grand_total real default 0
 );
 create table `tabDelivery Note Item` (
-	name text primary key, parent text, parenttype text default 'Delivery Note', idx int default 1,
+	name text primary key, parent text, parenttype text default 'Delivery Note',
+	parentfield text default 'items', idx int default 1,
 	so_detail text, si_detail text, stock_qty real default 0, amount real default 0,
 	billed_amt real default 0, returned_qty real default 0, rate real default 0
 );
@@ -138,8 +139,11 @@ class FakeDB:
 	def sql_list(self, query, values=None, **kwargs):
 		return [row[0] for row in self.sql(query, values)]
 
+	def get_table_columns(self, doctype):
+		return [row[1] for row in self.conn.execute(f"pragma table_info(`tab{doctype}`)")]
+
 	def has_column(self, doctype, column):
-		return column in {row[1] for row in self.conn.execute(f"pragma table_info(`tab{doctype}`)")}
+		return column in self.get_table_columns(doctype)
 
 	def get_value(self, doctype, name, fieldname, **kwargs):
 		rows = self.sql(f"select `{fieldname}` from `tab{doctype}` where name = %s", name)
@@ -167,6 +171,28 @@ class FakeDB:
 
 	def writes(self):
 		return [q for q in self.log if q.split(" ", 1)[0].lower() in ("update", "insert", "delete")]
+
+
+# the DocField types of the columns the billing modules read (frappe.get_meta(...).get_field); a
+# standard column such as docstatus has no DocField, as in frappe
+FIELDTYPES = {
+	"Delivery Note": {
+		"is_return": "Check",
+		"per_billed": "Percent",
+		"per_returned": "Percent",
+		"status": "Select",
+		"grand_total": "Currency",
+	},
+}
+
+
+class _Meta:
+	def __init__(self, doctype):
+		self.fields = FIELDTYPES.get(doctype, {})
+
+	def get_field(self, fieldname):
+		fieldtype = self.fields.get(fieldname)
+		return _dict(fieldname=fieldname, fieldtype=fieldtype) if fieldtype else None
 
 
 class _Logger:
@@ -252,6 +278,7 @@ def make():
 		return doc
 
 	fake._ = _
+	fake.get_meta = _Meta
 	fake.msgprint = msgprint
 	fake.clear_document_cache = clear_document_cache
 	fake.log_error = log_error
@@ -265,7 +292,11 @@ def make():
 	utils.cint = lambda v: int(flt(v))
 	utils.getdate = lambda v=None: v
 	utils.nowdate = lambda: "2026-09-27"
+	utils.cstr = lambda v: "" if v is None else str(v)
 	fake.utils = utils
+	model = types.ModuleType("frappe.model")
+	model.float_like_fields = {"Float", "Currency", "Percent"}  # frappe/model/__init__.py
+	fake.model = model
 	return fake
 
 
@@ -274,8 +305,9 @@ _SEQ = itertools.count()
 
 def load(path, fake):
 	"""Execute the module file at ``path`` with ``fake`` as its frappe; returns the module."""
-	saved = {key: sys.modules.get(key) for key in ("frappe", "frappe.utils")}
+	saved = {key: sys.modules.get(key) for key in ("frappe", "frappe.utils", "frappe.model")}
 	sys.modules["frappe"], sys.modules["frappe.utils"] = fake, fake.utils
+	sys.modules["frappe.model"] = fake.model
 	try:
 		spec = importlib.util.spec_from_file_location(f"_fake_frappe_mod_{next(_SEQ)}", path)
 		module = importlib.util.module_from_spec(spec)
