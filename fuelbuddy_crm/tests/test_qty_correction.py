@@ -441,12 +441,13 @@ class TestSalesOrderHeadroom(QtyCorrectionTestCase):
 	"""IDEV-3266 rulings (27 Sep): a reduction is never refused for Sales Order headroom, an increase
 	keeps the check on what it adds; a return frees Sales Order qty once."""
 
-	def over_booked(self, qty, submit):
+	def over_booked(self, qty, submit, uom="Litre"):
 		"""A 1000 L Sales Order line: the Delivery Note under test with ``qty`` on it, another live
 		draft holding the other 1000 - ``qty``, then the order cut to 900 L: over-booked by 100 L.
 		Drafts, not submitted notes, over-book it, so ERPNext's own over-delivery check (which counts
-		only submitted notes) stays out of the way and the headroom check is the one tested."""
-		so = self.so(1000)
+		only submitted notes) stays out of the way and the headroom check is the one tested. With
+		``uom``, every quantity here is in that unit instead of litres."""
+		so = self.so(1000, uom=uom)
 		dn = self.dn([(so, qty)], submit=submit)
 		self.dn([(so, 1000 - qty)])
 		frappe.db.set_value("Sales Order Item", so.items[0].name, "qty", 900)
@@ -462,6 +463,35 @@ class TestSalesOrderHeadroom(QtyCorrectionTestCase):
 		self.assertEqual([(row.so_detail, row.qty) for row in new.items], [(so.items[0].name, 550)])
 		self.assertEqual(self.soi(so, "delivered_qty"), 550)
 		self.assertEqual(self.log().result, "AMENDED")
+
+	def test_reduction_of_a_spilled_dn_with_an_over_booked_line_is_amended(self):
+		"""A Delivery Note spilled over two orders, the first over-booked, shrunk into the first:
+		the second line goes, the over-booked one is trimmed to 550 L, more than the 500 L the
+		line has left once the original is cancelled, and neither is refused."""
+		so_a = self.so(1000)
+		so_b = self.so(5000)
+		dn = self.dn([(so_a, 600), (so_b, 400)], submit=True)
+		self.dn([(so_a, 400)])
+		frappe.db.set_value("Sales Order Item", so_a.items[0].name, "qty", 900)  # over-booked by 100
+
+		r = self.amend(dn.name, 550)
+
+		self.assertOk(r, "AMENDED")
+		new = frappe.get_doc("Delivery Note", r["new_delivery_note"])
+		self.assertEqual([(row.so_detail, row.qty) for row in new.items], [(so_a.items[0].name, 550)])
+		self.assertEqual((self.soi(so_a, "delivered_qty"), self.soi(so_b, "delivered_qty")), (550, 0))
+
+	def test_imperial_gallon_reduction_on_an_over_booked_line_is_amended(self):
+		"""The same ruling on a line kept in Imperial Gallons, with the target given in litres."""
+		so, dn = self.over_booked(600, submit=True, uom=fx.IG)
+
+		r = self.amend(dn.name, 550 * fx.IG_FACTOR)
+
+		self.assertOk(r, "AMENDED")
+		row = frappe.get_doc("Delivery Note", r["new_delivery_note"]).items[0]
+		self.assertEqual((row.so_detail, row.uom), (so.items[0].name, fx.IG))
+		self.assertAlmostEqual(row.qty, 550, places=6)
+		self.assertAlmostEqual(self.soi(so, "delivered_qty"), 550, places=6)
 
 	def test_draft_reduction_on_an_over_booked_line_is_updated(self):
 		so, dn = self.over_booked(600, submit=False)
