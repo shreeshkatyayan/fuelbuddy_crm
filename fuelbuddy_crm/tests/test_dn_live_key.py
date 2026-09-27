@@ -12,8 +12,9 @@ the case production hit: enforce_single_active_dn's validate-time read passes it
 Needs erpnext + fuelbuddy_crm and a company (setup wizard done). The production-only fields the
 code reads (custom_invoiced_item_id, custom_version) are created where missing, and the patch is
 run where its field is missing (a fresh install marks patches done without running them). Each
-test uses its own invoiced-item id. The concurrency test commits one Delivery Note and deletes it
-afterwards.
+test uses its own invoiced-item id. The two concurrency tests each commit one Delivery Note and
+delete it afterwards; they need the database at REPEATABLE READ (MariaDB's default) and fail,
+rather than skip, when it is not.
 
     bench --site <site> run-tests --app fuelbuddy_crm --module fuelbuddy_crm.tests.test_dn_live_key
 """
@@ -199,18 +200,57 @@ class TestDeliveryNoteLiveKey(FrappeTestCase):
 	def test_concurrent_insert_is_refused_although_its_validate_read_cannot_see_the_first(self):
 		"""The production race: the second insert's transaction opened its snapshot before the
 		first insert committed, so enforce_single_active_dn (a plain read) passes it."""
+		self._race()
+
 		with self.secondary_connection():
+			with self.assertRaises(frappe.UniqueValidationError):
+				self.new_dn().insert(ignore_permissions=True)
+
+	def test_the_same_race_without_the_key_leaves_two_live_dns(self):
+		"""Control for the test above: with set_live_invoiced_item_key patched out (production
+		before IDEV-3269) the same race ends in a second live DN, so the refusal above is the key's
+		doing and not the validate check's."""
+		first = self._race()
+
+		with self.secondary_connection():
+			with mock.patch("fuelbuddy_crm.dn_validation.set_live_invoiced_item_key", return_value=None):
+				second = self.new_dn().insert(ignore_permissions=True)
+
+		self.assertNotEqual(second.name, first.name)
+		self.assertEqual(second.get(STAMP_FIELD), self.iid)
+
+	def _race(self):
+		"""The secondary connection opens its snapshot, then the primary inserts and commits the
+		first DN. Returns that DN, which the secondary's snapshot cannot see.
+
+		Each step names its connection: on its first use, Frappe 15's secondary_connection() saves
+		the connection to restore after frappe.connect() has already replaced it, so it leaves
+		frappe.local.db on the secondary. Left to that, the "first" insert runs on the secondary
+		too, and the test either waits on an earlier test's naming-series lock or sees its own DN."""
+		self.addCleanup(setattr, frappe.local, "db", self._primary_connection)
+		with self.secondary_connection():
+			levels = {
+				value
+				for _name, value in frappe.db.sql(
+					"show session variables where Variable_name in ('tx_isolation', 'transaction_isolation')"
+				)
+			}
+			self.assertEqual(
+				levels, {"REPEATABLE-READ"}, "the race needs REPEATABLE READ (MariaDB's default)"
+			)
 			frappe.db.sql("select name from `tabDelivery Note` limit 1")  # opens the snapshot
 
-		first = self.new_dn().insert(ignore_permissions=True)
-		frappe.db.commit()
+		with self.primary_connection():
+			frappe.db.rollback()  # earlier tests' uncommitted rows, and the naming-series lock they hold
+			first = self.new_dn().insert(ignore_permissions=True)
+			frappe.db.commit()
 		self.addCleanup(self._delete_committed, first.name)
 
 		with self.secondary_connection():
-			if frappe.db.get_value("Delivery Note", first.name):
-				self.skipTest("the DB is not REPEATABLE READ (MariaDB's default); the race needs it")
-			with self.assertRaises(frappe.UniqueValidationError):
-				self.new_dn().insert(ignore_permissions=True)
+			self.assertIsNone(
+				frappe.db.get_value("Delivery Note", first.name), "the snapshot predates the commit"
+			)
+		return first
 
 	def _delete_committed(self, name):
 		with self.primary_connection():

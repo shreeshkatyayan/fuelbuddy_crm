@@ -72,7 +72,12 @@ def set_live_invoiced_item_key(doc, method=None):
 	in the same UPDATE, and a versioned amendment inserted afterwards -- even in the same
 	transaction -- takes it. A deleted draft takes its key with it. Returns are never keyed.
 	Recomputed every time, so a value copied by Amend / copy_doc (no_copy is ignored there)
-	never survives."""
+	never survives.
+
+	Not run for a DN saved, submitted or cancelled with flags.ignore_validate: Frappe skips
+	validate and before_cancel then. Such a DN keeps the key it had, so a cancel done that way
+	leaves the item's next amendment refused until the key is cleared (it fails safe). No
+	Delivery Note write in the FuelBuddy ERP apps sets ignore_validate."""
 	iid = doc.get(STAMP_FIELD)
 	live = iid and doc.docstatus < 2 and not doc.get("is_return")
 	doc.set(LIVE_KEY_FIELD, iid if live else None)
