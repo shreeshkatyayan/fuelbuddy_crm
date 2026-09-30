@@ -14,7 +14,8 @@
   "new_delivery_note",
   "custom_version",
   "grand_total",
-  "target_qty"
+  "target_qty",
+  "wallet_below_zero"
  ],
  "fields": [
   {
@@ -77,13 +78,22 @@
    "fieldtype": "Float",
    "label": "Target Qty (L)",
    "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "The change left the customer's ERP wallet below zero; the overshoot Issue was raised with it (fuelbuddy_crm.qc_wallet).",
+   "fieldname": "wallet_below_zero",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Wallet Below Zero",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-26 00:00:00.000000",
+ "modified": "2026-09-30 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fuelbuddy CRM",
  "name": "DN Amend Log",

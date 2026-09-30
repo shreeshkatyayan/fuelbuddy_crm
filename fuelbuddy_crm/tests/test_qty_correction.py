@@ -305,7 +305,16 @@ class TestAmendSubmitted(QtyCorrectionTestCase):
 
 class TestAmendIdempotency(QtyCorrectionTestCase):
 	def assertSameResult(self, first, retry):
-		keys = ("ok", "code", "retryable", "result", "new_delivery_note", "custom_version", "grand_total")
+		keys = (
+			"ok",
+			"code",
+			"retryable",
+			"result",
+			"new_delivery_note",
+			"custom_version",
+			"grand_total",
+			"wallet_below_zero",
+		)
 		self.assertEqual({k: retry[k] for k in keys}, {k: first[k] for k in keys})
 
 	def test_retry_after_amended_returns_the_logged_result(self):
@@ -825,7 +834,12 @@ class TestGetAmendmentPlan(QtyCorrectionTestCase):
 		self.assertTrue(p["ok"])
 		self.assertEqual(
 			p["amend_log"],
-			{"result": "AMENDED", "new_delivery_note": r["new_delivery_note"], "custom_version": 2},
+			{
+				"result": "AMENDED",
+				"new_delivery_note": r["new_delivery_note"],
+				"custom_version": 2,
+				"wallet_below_zero": False,  # no ERP wallet on the test site's customer
+			},
 		)
 		self.assertEqual(
 			(p["live_delivery_note"], p["dn_at_target"], p["docstatus"]), (r["new_delivery_note"], True, 1)
@@ -837,7 +851,13 @@ class TestGetAmendmentPlan(QtyCorrectionTestCase):
 		p = self.plan(dn.custom_invoiced_item_id, 0)
 		self.assertTrue(p["ok"])
 		self.assertEqual(
-			p["amend_log"], {"result": "DRAFT_DELETED", "new_delivery_note": None, "custom_version": None}
+			p["amend_log"],
+			{
+				"result": "DRAFT_DELETED",
+				"new_delivery_note": None,
+				"custom_version": None,
+				"wallet_below_zero": False,
+			},
 		)
 		self.assertIsNone(p["live_delivery_note"])
 
