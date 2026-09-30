@@ -22,6 +22,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, cint, cstr, flt, get_first_day, getdate, nowdate, strip_html
 
+from fuelbuddy_crm.dn_unbilled_litres import litres_rebuild_enabled, unbilled_rows
 from fuelbuddy_crm.force_majeure import fm_rate, fm_resolver, force_line
 
 ISSUE_TYPE = "Invoicing"
@@ -346,7 +347,15 @@ def rebuild_lines_from_dn_range(doc, method=None):
 	before the controller's validate so ERPNext computes stock qty, amounts and
 	totals off the rebuilt lines itself; the Server Script ran after and had to
 	patch them by hand. Scheduler invoices arrive with their lines already built
-	per group and are skipped via the ``fb_auto_invoicing`` flag."""
+	per group and are skipped via the ``fb_auto_invoicing`` flag.
+
+	Litres, not amounts (IDEV-3270, owner decision 29 Sep): with the site switch
+	``invoice_rebuild_by_litres`` on, what is left to invoice is counted in litres
+	-- delivered litres less the litres already on live invoices for each DN line
+	(fuelbuddy_crm.dn_unbilled_litres) -- so a DN whose litres are all invoiced at a
+	discount or another price is not offered again. Off by default; switched on
+	only after the IDEV-3268 one-time billing repair has run on the site. Off, the
+	status filter and amount fraction above apply unchanged."""
 	if not doc.is_new() or doc.flags.get("fb_auto_invoicing"):
 		return
 	from_date, to_date = doc.get("custom_dn_from_date"), doc.get("custom_dn_to_date")
@@ -358,24 +367,10 @@ def rebuild_lines_from_dn_range(doc, method=None):
 	if not so_details:
 		return
 
-	dn_rows = frappe.db.sql(
-		"""
-		select dn.name as dn, dn.posting_date, dni.so_detail, dni.item_code,
-			case when coalesce(dni.amount, 0) > 0
-				then dni.qty * greatest((dni.amount - coalesce(dni.billed_amt, 0)) / dni.amount, 0)
-				else dni.qty end as qty
-		from `tabDelivery Note Item` dni
-		join `tabDelivery Note` dn on dn.name = dni.parent
-		where dn.docstatus = 1
-			and dn.status in ('To Bill', 'Partially Billed')
-			and dn.posting_date between %(from_date)s and %(to_date)s
-			and dni.so_detail in %(so_details)s
-		order by dn.posting_date, dn.name, dni.idx
-		""",
-		{"from_date": from_date, "to_date": to_date, "so_details": tuple(so_details)},
-		as_dict=True,
-	)
-	dn_rows = [d for d in dn_rows if flt(d.qty) > 0]  # fully billed rows add nothing
+	if litres_rebuild_enabled():
+		dn_rows = unbilled_rows(so_details, from_date, to_date)
+	else:
+		dn_rows = _unbilled_rows_by_amount(so_details, from_date, to_date)
 	dns_for = {}
 	for d in dn_rows:
 		dns_for.setdefault(d.so_detail, set()).add(d.dn)
@@ -398,6 +393,30 @@ def rebuild_lines_from_dn_range(doc, method=None):
 				),
 				alert=True,
 			)
+
+
+def _unbilled_rows_by_amount(so_details, from_date, to_date):
+	"""The rebuild's rows with the litres switch off: ``To Bill`` / ``Partially
+	Billed`` DNs in the window, each row's unbilled fraction by AMOUNT (ERPNext's
+	billing status); fully billed rows add nothing."""
+	dn_rows = frappe.db.sql(
+		"""
+		select dn.name as dn, dn.posting_date, dni.so_detail, dni.item_code,
+			case when coalesce(dni.amount, 0) > 0
+				then dni.qty * greatest((dni.amount - coalesce(dni.billed_amt, 0)) / dni.amount, 0)
+				else dni.qty end as qty
+		from `tabDelivery Note Item` dni
+		join `tabDelivery Note` dn on dn.name = dni.parent
+		where dn.docstatus = 1
+			and dn.status in ('To Bill', 'Partially Billed')
+			and dn.posting_date between %(from_date)s and %(to_date)s
+			and dni.so_detail in %(so_details)s
+		order by dn.posting_date, dn.name, dni.idx
+		""",
+		{"from_date": from_date, "to_date": to_date, "so_details": tuple(so_details)},
+		as_dict=True,
+	)
+	return [d for d in dn_rows if flt(d.qty) > 0]
 
 
 def update_so_last_invoiced(doc, method=None):
