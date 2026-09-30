@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Fuelbuddy and contributors
 # For license information, please see license.txt
 
-"""amend_delivery_note / get_amendment_plan (IDEV-3266) on a live ERPNext site.
+"""amend_delivery_note / get_amendment_plan / check_correction_raise (IDEV-3266) on a live ERPNext
+site.
 
 Needs erpnext + fuelbuddy_crm and a company (setup wizard done).
 Production-only schema is stood in by qc_fixtures.ensure_prod_schema. Every test gets its own
@@ -912,6 +913,121 @@ class TestGetAmendmentPlan(QtyCorrectionTestCase):
 	def test_invalid_input(self):
 		p = self.plan(str(uuid.uuid4()), -1)
 		self.assertEqual((p["ok"], p["code"]), (False, "ERP_VALIDATION"))
+
+
+class TestCheckCorrectionRaise(QtyCorrectionTestCase):
+	"""IDEV-3266 owner decisions: a raise on a delivery an invoice covers, even a draft invoice, is
+	refused and names the invoice (30 Sep); so is one whose Delivery Note has a return (29 Sep)."""
+
+	def check(self, iid):
+		return qty_correction.check_correction_raise(invoiced_item_id=iid)
+
+	def make_return(self, dn, submit=True):
+		from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return
+
+		ret = make_sales_return(dn.name)
+		ret.items[0].qty = -100
+		ret.posting_date = "2026-08-16"
+		ret.set_posting_time = 1
+		ret.insert()
+		if submit:
+			# Loaded afresh, as the desk and REST submit it (see test_a_return_frees_its_qty_once).
+			frappe.get_doc("Delivery Note", ret.name).submit()
+		return ret.name
+
+	def test_no_live_dn(self):
+		self.assertEqual(
+			self.check(str(uuid.uuid4())),
+			{
+				"ok": True,
+				"code": None,
+				"message": None,
+				"no_dn": True,
+				"delivery_notes": [],
+				"invoices": [],
+				"returns": [],
+			},
+		)
+
+	def test_a_cancelled_dn_is_no_dn(self):
+		dn = self.dn([(self.so(10000), 1000)], submit=True)
+		dn.cancel()
+		r = self.check(dn.custom_invoiced_item_id)
+		self.assertEqual((r["ok"], r["no_dn"]), (True, True))
+
+	def test_a_live_dn_nothing_blocks(self):
+		for submit in (False, True):
+			with self.subTest(submitted=submit):
+				dn = self.dn([(self.so(10000), 1000)], submit=submit)
+				r = self.check(dn.custom_invoiced_item_id)
+				self.assertEqual(
+					(r["ok"], r["code"], r["no_dn"], r["delivery_notes"], r["invoices"], r["returns"]),
+					(True, None, False, [dn.name], [], []),
+				)
+
+	def test_invoiced_by_a_draft_or_submitted_sales_invoice_names_it(self):
+		for submit_si in (False, True):
+			with self.subTest(submitted_invoice=submit_si):
+				so = self.so(10000)
+				dn = self.dn([(so, 1000)], submit=True, posting_date="2026-08-15")
+				si = fx.make_sales_invoice(so, "2026-08-01", "2026-08-31", submit=submit_si)
+				r = self.check(dn.custom_invoiced_item_id)
+				self.assertEqual((r["ok"], r["code"], r["invoices"]), (False, "INVOICED", [si.name]))
+				self.assertIn(si.name, r["message"])
+
+	def test_invoice_whose_window_misses_the_posting_date_does_not_block(self):
+		so = self.so(10000, transaction_date="2026-07-01")
+		dn = self.dn([(so, 1000)], submit=True, posting_date="2026-08-15")
+		fx.make_sales_invoice(so, "2026-07-01", "2026-07-31")
+		self.assertTrue(self.check(dn.custom_invoiced_item_id)["ok"])
+
+	def test_a_draft_dn_is_never_invoiced(self):
+		"""The amend's own rule: an unsubmitted note no invoice took is not invoiced."""
+		so = self.so(10000)
+		dn = self.dn([(so, 1000)], posting_date="2026-08-15")
+		fx.make_sales_invoice(so, "2026-08-01", "2026-08-31")
+		self.assertTrue(self.check(dn.custom_invoiced_item_id)["ok"])
+
+	def test_a_submitted_return_refuses_and_is_named(self):
+		dn = self.dn([(self.so(10000), 1000)], submit=True)
+		ret = self.make_return(dn)
+		r = self.check(dn.custom_invoiced_item_id)
+		self.assertEqual(
+			(r["ok"], r["code"], r["delivery_notes"], r["returns"]), (False, "HAS_RETURN", [dn.name], [ret])
+		)
+		self.assertIn(ret, r["message"])
+
+	def test_a_draft_return_does_not_block(self):
+		dn = self.dn([(self.so(10000), 1000)], submit=True)
+		self.make_return(dn, submit=False)
+		self.assertTrue(self.check(dn.custom_invoiced_item_id)["ok"])
+
+	def test_invoiced_wins_over_a_return_and_both_are_named(self):
+		so = self.so(10000)
+		dn = self.dn([(so, 1000)], submit=True, posting_date="2026-08-15")
+		ret = self.make_return(dn)
+		si = fx.make_sales_invoice(so, "2026-08-01", "2026-08-31")
+		r = self.check(dn.custom_invoiced_item_id)
+		self.assertEqual((r["code"], r["invoices"], r["returns"]), ("INVOICED", [si.name], [ret]))
+
+	def test_agrees_with_the_plan_about_invoiced(self):
+		so = self.so(10000)
+		dn = self.dn([(so, 1000)], submit=True, posting_date="2026-08-15")
+		iid = dn.custom_invoiced_item_id
+		self.assertEqual((self.check(iid)["ok"], self.plan(iid, 800)["ok"]), (True, True))
+		fx.make_sales_invoice(so, "2026-08-01", "2026-08-31")
+		self.assertEqual((self.check(iid)["code"], self.plan(iid, 800)["code"]), ("INVOICED", "INVOICED"))
+
+	def test_invalid_input(self):
+		r = self.check("  ")
+		self.assertEqual((r["ok"], r["code"]), (False, "ERP_VALIDATION"))
+
+	def test_check_writes_nothing(self):
+		dn = self.dn([(self.so(10000), 1000)], submit=True)
+		frappe.db.commit()
+		modified = frappe.db.get_value("Delivery Note", dn.name, "modified")
+		self.check(dn.custom_invoiced_item_id)
+		self.assertEqual(frappe.db.get_value("Delivery Note", dn.name, "modified"), modified)
 
 
 class TestSharedChecks(QtyCorrectionTestCase):

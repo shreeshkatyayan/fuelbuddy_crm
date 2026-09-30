@@ -196,8 +196,9 @@ def covering_invoices(doc):
 	"""The invoices a change to this DN affects: the one that took it and, for a submitted DN,
 	every invoice whose window covers it. Empty when the DN cannot affect any link.
 
-	Also the quantity-correction amend's INVOICED test (fuelbuddy_crm.api.qty_correction), so
-	the two can never disagree about whether a DN is invoiced."""
+	Also the quantity-correction INVOICED test (fuelbuddy_crm.api.qty_correction), at raise
+	(check_correction_raise) and at amend, so none of them can disagree about whether a DN is
+	invoiced."""
 	so_details = [i.so_detail for i in doc.items if i.so_detail]
 	if not so_details:
 		return set()
