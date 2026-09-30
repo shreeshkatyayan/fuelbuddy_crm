@@ -11,16 +11,22 @@ database, not a validate-time read, refuses a second live Delivery Note for one 
 check two concurrent inserts slip past. Unique NULLs do not clash, so Delivery Notes made before
 this patch (NULL here) need no backfill and existing duplicates do not block the index.
 
+The table comes first. fuelbuddy_crm.dn_key_columns.ensure adds the column and its unique index
+online, under a capped lock wait, and checks them; precreate_dn_key_columns already ran it at the
+start of the migrate, so here it normally only reads. Then the Custom Field is created, and Frappe's
+sync of the table finds nothing to change. So the field is never committed without its column -- the
+state in which every Delivery Note save fails with "Unknown column" and a second migrate does not
+repair it -- and a run that stops anywhere is simply run again.
+
 custom_invoiced_item_id is a production Custom Field made through the UI (in no app's fixtures).
 Every create looks Delivery Notes up by it; production turned its Index on (search_index) on
 2026-08-05. Frappe drops an index whose field says search_index = 0 the next time it syncs the
-table -- which the create_custom_fields below does -- so the flag is set first, and the sync then
-adds `custom_invoiced_item_id_index` where it is missing. A field that is unique already has an
-index and is left alone."""
+table, so ensure() sets the flag where the field is not unique, and builds
+`custom_invoiced_item_id_index` online where it is missing."""
 
-import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
+from fuelbuddy_crm import dn_key_columns
 from fuelbuddy_crm.dn_validation import LIVE_KEY_FIELD, STAMP_FIELD
 
 CUSTOM_FIELDS = {
@@ -43,12 +49,13 @@ CUSTOM_FIELDS = {
 
 
 def execute():
-	stamp = frappe.db.get_value(
-		"Custom Field",
-		{"dt": "Delivery Note", "fieldname": STAMP_FIELD},
-		["name", "search_index", "unique"],
-		as_dict=True,
-	)
-	if stamp and not stamp.search_index and not stamp.unique:
-		frappe.db.set_value("Custom Field", stamp.name, "search_index", 1)
+	"""The live key's column and indexes, online (a read-only no-op once in place), then its Custom Field."""
+	db = dn_key_columns.FrappeDB()
+	dn_key_columns.ensure(db)
 	create_custom_fields(CUSTOM_FIELDS, ignore_validate=True)
+	# Frappe's sync had nothing to change; if it changed the columns after all, stop here, loudly.
+	if problems := dn_key_columns.unready(dn_key_columns.read_state(db)):
+		raise dn_key_columns.KeyColumnsError(
+			"After creating the Custom Field, the Delivery Note key columns are not as Frappe builds "
+			f"them ({dn_key_columns.DOCS}):\n- " + "\n- ".join(problems)
+		)
