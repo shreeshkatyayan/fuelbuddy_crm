@@ -16,6 +16,10 @@ the Quotation / Opportunity is applied per line off the catalog price.
 
 Failures are logged as an Issue (``issue_type = "Invoicing"``) without blocking
 the batch.
+
+A Sales Order with a delivery under quantity correction in its window waits
+(IDEV-3266, fuelbuddy_crm.invoice_hold): no invoice, cursor untouched, one log
+line per day; the next run takes the whole window again.
 """
 
 import frappe
@@ -23,6 +27,7 @@ from frappe import _
 from frappe.utils import add_days, cint, cstr, flt, get_first_day, getdate, nowdate, strip_html
 
 from fuelbuddy_crm.force_majeure import fm_rate, fm_resolver, force_line
+from fuelbuddy_crm.invoice_hold import InvoiceHeldError, defer_sales_order, held_deliveries, so_line_names
 
 ISSUE_TYPE = "Invoicing"
 VALID_INVOICING_TYPES = ("Single Invoice", "Split Invoice")
@@ -51,6 +56,12 @@ def generate_sales_invoices():
 		try:
 			_invoice_sales_order(so_name, all_customers)
 			frappe.db.commit()
+		except InvoiceHeldError as e:
+			# A hold landed between the check in _invoice_sales_order and an invoice insert
+			# (fuelbuddy_crm.invoice_hold refuses it): the whole Sales Order waits, as if the
+			# check had seen it. Nothing of this Sales Order is kept, the cursor included.
+			frappe.db.rollback()
+			defer_sales_order(so_name, held=e.held)
 		except Exception as e:
 			frappe.db.rollback()
 			_log_invoicing_issue(
@@ -121,6 +132,14 @@ def _invoice_sales_order(so_name, all_customers=False):
 	if not window:
 		return
 	from_date, to_date, freq_days = window
+
+	# IDEV-3266: a delivery under quantity correction in the window holds the whole Sales Order
+	# (every invoice the window gives would make it INVOICED). The cursor is left alone, so the
+	# next run takes the whole window again.
+	held = held_deliveries(so_line_names(so_name), from_date, to_date)
+	if held:
+		defer_sales_order(so_name, from_date, to_date, held)
+		return
 
 	dns = frappe.db.sql(
 		"""
