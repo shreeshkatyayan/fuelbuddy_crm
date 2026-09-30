@@ -28,6 +28,6 @@ def checkout_root(app):
 	if not root or not (root / app / "__init__.py").is_file():
 		raise unittest.SkipTest(
 			f"{app} is not installed: this test reads {app}'s own code. Run it where {app} is importable "
-			f"(bench run-tests), or set {env} to a {app} checkout."
+			f"(bench run-tests), or set {env} to a checkout of {app}."
 		)
 	return root

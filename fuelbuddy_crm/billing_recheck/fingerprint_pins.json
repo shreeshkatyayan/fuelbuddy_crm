@@ -21,7 +21,7 @@
     "status_updater.StatusUpdater.update_prevdoc_status": "787241d7c32b86c195477e8c6b199a18ce53c32b4840fd7e115fcee4e643a65a",
     "status_updater.StatusUpdater.update_qty": "0235e54544fd0a47dd336d2e9000933bb29f77d702938305e39174fd5cdc08f0",
     "status_updater.StatusUpdater._update_children": "8e4144c603774da3849818ac9d159d8db42efc39efc61b1ad629b83de42b1659",
-    "delivery_note.make_sales_return":"5d0406d13401c255f22043cbee51d8eb0fbf390b55d13e81c4ff06a2b067591b",
+    "delivery_note.make_sales_return": "5d0406d13401c255f22043cbee51d8eb0fbf390b55d13e81c4ff06a2b067591b",
     "sales_and_purchase_return.make_return_doc": "f5cbeabe1e65cb2d37352549eec689a1aa9db75478b1745a81b83d60af623f9b",
     "stock_controller.StockController.update_billing_percentage": "d4e257b5b2dda2279800d6f7aeef19b5621d6fd78552761851cdd87b9165dc7c",
     "status_updater.StatusUpdater._update_percent_field": "1c59222be9e620bed156595948c731de67120699bd7c2ff56088fd3be8f2d4fd",
