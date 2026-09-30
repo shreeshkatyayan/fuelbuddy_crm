@@ -396,6 +396,14 @@ doc_events = {
         "on_cancel": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
         "on_trash": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
     },
+    # IDEV-3201: depot posts carry the app's op key (unique, kept when cancelled). Amending copies
+    # it, so the amendment drops it before insert rather than collide with the original.
+    "Purchase Receipt": {
+        "before_insert": "fuelbuddy_crm.op_key.clear_on_amend",
+    },
+    "Stock Entry": {
+        "before_insert": "fuelbuddy_crm.op_key.clear_on_amend",
+    },
 }
 
 scheduler_events = {
