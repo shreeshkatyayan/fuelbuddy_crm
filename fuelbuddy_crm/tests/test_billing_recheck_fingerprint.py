@@ -4,9 +4,10 @@
 """The upgrade guard's fingerprint and the CI script scripts/check_billing_walk_fingerprint.py (IDEV-3268).
 
 Pure: no site needed (``python -m unittest fuelbuddy_crm.tests.test_billing_recheck_fingerprint``).
-It also checks real checkouts when it can find them: the erpnext / frappe this interpreter can import
-(``bench run-tests`` in the lab), or the directories named by BILLING_RECHECK_ERPNEXT and
-BILLING_RECHECK_FRAPPE (checkouts of pinned versions, e.g. ``git worktree add ... v15.96.0``).
+It also checks real checkouts when it can find them (tests/stock_code.py): the erpnext / frappe this
+interpreter can import (``bench run-tests`` in the lab), or the directories named by
+BILLING_RECHECK_ERPNEXT and BILLING_RECHECK_FRAPPE (checkouts of pinned versions, e.g. ``git worktree
+add ... v15.96.0``). The tests that need one are skipped without it.
 """
 
 import ast
@@ -14,7 +15,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import os
 import pathlib
 import shutil
 import tempfile
@@ -22,6 +22,7 @@ import textwrap
 import unittest
 
 from fuelbuddy_crm.billing_recheck import fingerprint as fp
+from fuelbuddy_crm.tests.stock_code import checkout_root
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "check_billing_walk_fingerprint.py"
@@ -232,24 +233,11 @@ class TestScript(unittest.TestCase):
 		self.assertIn('"callers": 2', output)
 
 
-def _installed_root(app):
-	spec = importlib.util.find_spec(app)  # locates the package without importing it
-	return pathlib.Path(spec.origin).parent.parent if spec and spec.origin else None
-
-
-def checkout_root(testcase, app):
-	root = os.environ.get(f"BILLING_RECHECK_{app.upper()}")
-	root = pathlib.Path(root) if root else _installed_root(app)
-	if not root or not (root / app / "__init__.py").exists():
-		testcase.skipTest(f"no {app} checkout (set BILLING_RECHECK_{app.upper()})")
-	return root
-
-
 class TestRealCheckouts(unittest.TestCase):
 	"""The code actually installed (or named by the environment) must match its pin."""
 
 	def check(self, app):
-		root = checkout_root(self, app)
+		root = checkout_root(app)
 		version, _hashes, mismatches = fp.check_checkout(root, app)
 		self.assertEqual(mismatches, [], f"{app} {version} at {root}")
 
@@ -272,12 +260,8 @@ class TestCopiedStockCode(unittest.TestCase):
 	"""The statements the re-check copies from ERPNext are ERPNext's, statement for statement."""
 
 	def test_walk_queries_are_stocks(self):
-		fixture = (
-			pathlib.Path(__file__).parent
-			/ "fixtures"
-			/ "erpnext_v15_96_0_update_billed_amount_based_on_so.py.txt"
-		)
-		stock = fp.find(ast.parse(fixture.read_text()), fp.WALK).body
+		root = checkout_root("erpnext")
+		stock = fp.find(ast.parse((root / fp.ERPNEXT_MODULES["delivery_note"]).read_text()), fp.WALK).body
 		walk = _source_tree("walk.py")
 		# stock: [import Sum, si, si_item, sum_amount, billed = qb...run(), billed = b and b[0][0] or 0,
 		#         dn, dn_item, dn_details = qb...run(as_dict=True), updated_dn, for, return]
@@ -295,7 +279,7 @@ class TestCopiedStockCode(unittest.TestCase):
 		_same(self, query, stock[8].value)
 
 	def test_invoice_body_is_stocks(self):
-		root = checkout_root(self, "erpnext")
+		root = checkout_root("erpnext")
 		stock = fp.find(
 			ast.parse((root / fp.ERPNEXT_MODULES["sales_invoice"]).read_text()),
 			"SalesInvoice.update_billing_status_in_dn",

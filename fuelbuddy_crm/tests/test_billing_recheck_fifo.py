@@ -3,20 +3,28 @@
 
 """billing_recheck.fifo must compute exactly what ERPNext's own walk writes (IDEV-3268).
 
-The reference is ERPNext v15.96.0's ``update_billed_amount_based_on_so`` itself: the verbatim source in
-``fixtures/`` (checked here against the pinned fingerprint, so it is provably the pinned stock function)
-is executed against a stand-in ``frappe`` that answers its three queries from synthetic rows and records
-its ``set_value`` writes. Every value fifo.stock_values computes must be bit-identical (same repr, so
-also the same int / float type) to what stock writes, on hand-made lines (frontier, returns and credit
-notes, discounts, direct dn_detail billing, si_detail rows, over-billing, the 2**23 band) and on
+The reference is ERPNext's ``update_billed_amount_based_on_so`` itself, read from the installed ERPNext
+(tests/stock_code.py: a bench's erpnext, or the checkout BILLING_RECHECK_ERPNEXT names), never a copy.
+It is executed against a stand-in ``frappe`` that answers its three queries from synthetic rows and
+records its ``set_value`` writes. Every value fifo.stock_values computes must be bit-identical (same
+repr, so also the same int / float type) to what stock writes, on hand-made lines (frontier, returns and
+credit notes, discounts, direct dn_detail billing, si_detail rows, over-billing, the 2**23 band) and on
 thousands of random ones.
 
-Pure: no site needed (``python -m unittest fuelbuddy_crm.tests.test_billing_recheck_fifo`` from the app
-directory); it also runs under ``bench run-tests``.
+The walk must also be the one pinned for that ERPNext version, so a pass speaks for the code the runtime
+guard lets through. On an ERPNext version that is not pinned yet, the equivalence tests still run (that
+is the re-check of its walk) and the pin test fails until the version is pinned.
+
+Pure: no site needed. Without ERPNext the stock tests are skipped and TestWriteSkip still runs:
+
+    python -m unittest fuelbuddy_crm.tests.test_billing_recheck_fifo
+    BILLING_RECHECK_ERPNEXT=<erpnext checkout> python -m unittest fuelbuddy_crm.tests.test_billing_recheck_fifo
+
+Both run from the app directory; the tests also run under ``bench run-tests``.
 """
 
 import ast
-import pathlib
+import functools
 import random
 import sys
 import types
@@ -26,12 +34,27 @@ from unittest import mock
 
 from fuelbuddy_crm.billing_recheck import fifo
 from fuelbuddy_crm.billing_recheck import fingerprint as fp
+from fuelbuddy_crm.tests.stock_code import checkout_root
 
-FIXTURE = (
-	pathlib.Path(__file__).parent / "fixtures" / "erpnext_v15_96_0_update_billed_amount_based_on_so.py.txt"
-)
-SOURCE = FIXTURE.read_text()
-PINNED = fp.load_pins()["erpnext"]["15.96.0"]["segments"]["delivery_note.update_billed_amount_based_on_so"]
+WALK_SEGMENT = "delivery_note.update_billed_amount_based_on_so"
+
+
+@functools.cache
+def stock_walk():
+	"""ERPNext's own walk from the installed ERPNext: its root, version, parsed delivery_note.py and the
+	function compiled on its own (tracebacks show the real file and line). Skips without ERPNext."""
+	root = checkout_root("erpnext")
+	path = root / fp.ERPNEXT_MODULES["delivery_note"]
+	tree = ast.parse(path.read_text())
+	node = fp.find(tree, fp.WALK)
+	if not isinstance(node, ast.FunctionDef):
+		raise AssertionError(
+			f"{path} defines no function {fp.WALK}: the walk moved, re-check it before pinning"
+		)
+	code = compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec")
+	return types.SimpleNamespace(
+		root=root, version=fp.app_version(root, "erpnext"), path=path, tree=tree, code=code
+	)
 
 
 def frappe_flt(s, precision=None, rounding_method=None):
@@ -98,10 +121,11 @@ def run_stock(billed_raw, rows, direct):
 	fake = FakeFrappe(billed_raw, rows, direct)
 	functions = types.ModuleType("frappe.query_builder.functions")
 	functions.Sum = lambda *a, **k: _Query(fake)
-	namespace = {"frappe": fake, "flt": frappe_flt}
+	# Sum both ways ERPNext gets it: imported inside the function (v15) or at module level (later)
+	namespace = {"frappe": fake, "flt": frappe_flt, "Sum": functions.Sum}
 	with mock.patch.dict(sys.modules, {"frappe.query_builder.functions": functions}):
-		exec(compile(SOURCE, str(FIXTURE), "exec"), namespace)
-		parents = namespace["update_billed_amount_based_on_so"]("SOI-LINE", True)
+		exec(stock_walk().code, namespace)
+		parents = namespace[fp.WALK]("SOI-LINE", True)
 	return fake.writes, parents
 
 
@@ -125,12 +149,24 @@ def line(amounts, si_detail=(), stored=None):
 	]
 
 
-class TestFixtureIsStock(unittest.TestCase):
-	def test_fixture_matches_the_pinned_fingerprint(self):
-		self.assertEqual(fp.segment_hash(ast.parse(SOURCE), fp.WALK), PINNED)
+class TestReferenceIsStock(unittest.TestCase):
+	def test_installed_walk_is_the_pinned_walk(self):
+		walk = stock_walk()
+		pinned = fp.load_pins()["erpnext"].get(walk.version)
+		if pinned is None:
+			self.fail(
+				f"erpnext {walk.version} ({walk.root}) is not pinned in fingerprint_pins.json. TestStockValues "
+				"compared fifo with its walk; pin the version only once the billing re-check is confirmed "
+				"against it (README: Before any ERPNext or Frappe update)."
+			)
+		self.assertEqual(fp.segment_hash(walk.tree, fp.WALK), pinned["segments"][WALK_SEGMENT])
 
 
 class TestStockValues(unittest.TestCase):
+	@classmethod
+	def setUpClass(cls):
+		stock_walk()  # skips the class, with the reason, when ERPNext is not installed
+
 	def assertSameAsStock(self, billed_raw, rows, direct=None):
 		direct = direct or {}
 		writes, parents = run_stock(billed_raw, rows, direct)
