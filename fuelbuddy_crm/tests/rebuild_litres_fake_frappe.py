@@ -235,8 +235,22 @@ def make(site_config=None, common_config=None):
 	utils = types.ModuleType("frappe.utils")
 	for fn in (flt, cint, cstr, getdate, add_days, get_first_day, nowdate, strip_html):
 		setattr(utils, fn.__name__, fn)
+	utils.__getattr__ = _not_faked  # PEP 562: other names import fine and fail only if called
 	fake.utils = utils
 	return fake
+
+
+def _not_faked(name):
+	"""A frappe.utils name these tests never call. auto_invoicing imports modules of other features
+	(the invoice hold, for one) that bring their own frappe.utils imports; they must load, not run."""
+	if name.startswith("__"):
+		raise AttributeError(name)
+
+	def stub(*args, **kwargs):
+		raise NotImplementedError(f"frappe.utils.{name} is not faked in rebuild_litres_fake_frappe")
+
+	stub.__name__ = name
+	return stub
 
 
 def dispose(fake):
