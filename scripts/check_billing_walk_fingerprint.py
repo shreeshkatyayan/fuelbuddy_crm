@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Fail when the ERPNext / frappe code the billing re-check relies on differs from what it was proven
-against (IDEV-3268).
+"""Pre-deploy check for any ERPNext or Frappe update: is this the code the billing re-check was proven
+against? (IDEV-3268)
 
-Run it in CI or before a deploy against the exact erpnext and frappe checkouts that will run in prod:
+Run it against the exact erpnext and frappe apps that will be deployed, and block the deploy unless it
+exits 0 (README.md: Before any ERPNext or Frappe update):
 
-    python scripts/check_billing_walk_fingerprint.py --bench /home/frappe/frappe-bench
-    python scripts/check_billing_walk_fingerprint.py --erpnext <erpnext checkout> --frappe <frappe checkout>
+    python3 scripts/check_billing_walk_fingerprint.py --bench /home/frappe/frappe-bench
+    python3 scripts/check_billing_walk_fingerprint.py --erpnext <erpnext checkout> --frappe <frappe checkout>
 
-It checks, per app: the version is pinned in fuelbuddy_crm/billing_recheck/fingerprint_pins.json, every
-pinned code segment has the pinned fingerprint, and (erpnext) update_billed_amount_based_on_so has
-exactly the pinned number of callers across the whole package. Exit 0 when everything matches, 1 on
-any mismatch, 2 on a usage or read error. It needs only the Python standard library.
+Per app it checks against fuelbuddy_crm/billing_recheck/fingerprint_pins.json: the version is pinned,
+every pinned code segment has the pinned fingerprint, (erpnext) update_billed_amount_based_on_so has
+exactly the pinned number of callers across the whole package, and (frappe) every database driver its
+pyproject.toml installs is pinned at that version. It needs only the Python standard library.
 
-When an upgrade is intended: review the diff of every mismatching segment, then add the version to the
-pins file from the block ``--print`` shows. The runtime guard runs stock ERPNext code on any version
-that is not pinned, so an unpinned upgrade is safe but loses the speed-up.
+Exit 0: PASS, everything matches. Exit 1: FAIL, something differs; do not deploy. Exit 2: the check
+could not run (usage or read error); do not deploy either.
+
+When an upgrade is intended: review the diff of every segment listed, re-test, then add the version to
+the pins file from the block ``--print`` shows. Deployed without that, billing stays correct but slow:
+the runtime guard runs stock ERPNext code on anything that is not pinned.
 """
 
 import argparse
@@ -25,6 +29,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 FINGERPRINT = HERE.parent / "fuelbuddy_crm" / "billing_recheck" / "fingerprint.py"
+README = 'README.md, "Before any ERPNext or Frappe update"'
 
 
 def load_fingerprint():
@@ -42,6 +47,20 @@ def app_root(path, app):
 	if path.name == app and (path / "__init__.py").is_file():
 		return path.parent
 	raise FileNotFoundError(f"no {app} package under {path}")
+
+
+def checked(fp, app, root, version, hashes, pins, scan_callers):
+	"""What an ``ok`` line covered, for the summary."""
+	out = [f"{len(hashes)} code segments"]
+	if app == "erpnext":
+		callers = (pins.get(app, {}).get(version) or {}).get("callers")
+		out.append(
+			f"{callers} callers of {fp.WALK}" if scan_callers else "callers not checked (--no-callers)"
+		)
+	if app == "frappe":
+		drivers = ", ".join(f"{driver} {v}" for driver, v in fp.declared_drivers(root) or [])
+		out.append(f"database driver {drivers}")
+	return ", ".join(out)
 
 
 def main(argv=None):
@@ -66,8 +85,9 @@ def main(argv=None):
 		print("error: give --bench, or both --erpnext and --frappe", file=sys.stderr)
 		return 2
 
+	pins_file = args.pins or fp.PINS_FILE
 	try:
-		pins = fp.load_pins(args.pins) if args.pins else fp.load_pins()
+		pins = fp.load_pins(pins_file)
 		results = {}
 		for app, path in targets.items():
 			root = app_root(path, app)
@@ -75,27 +95,36 @@ def main(argv=None):
 			results[app] = (root, version, hashes, mismatches)
 	except (OSError, SyntaxError, ValueError) as exc:
 		print(f"error: {exc}", file=sys.stderr)
+		print(f"FAIL: the check could not run. Do not deploy until it passes ({README}).", file=sys.stderr)
 		return 2
 
-	failed = False
+	print(f"Billing re-check pre-deploy check against {pins_file}")
+	failed = []
 	for app, (root, version, hashes, mismatches) in results.items():
-		status = "MISMATCH" if mismatches else "ok"
-		print(f"{app} {version} at {root}: {status}")
-		for reason in mismatches:
-			print(f"  - {reason}")
-		failed = failed or bool(mismatches)
+		if mismatches:
+			failed.append(app)
+			print(f"  {app} {version}: MISMATCH at {root}")
+			for reason in mismatches:
+				print(f"    - {reason}")
+		else:
+			print(
+				f"  {app} {version}: ok ({checked(fp, app, root, version, hashes, pins, not args.no_callers)})"
+			)
+			print(f"    at {root}")
 		if args.print:
 			block = {version: {"segments": hashes}}
 			if app == "erpnext":
 				block[version]["callers"] = fp.tree_callers(root, app)[0]
 			print(json.dumps({app: block}, indent=1))
+	sys.stdout.flush()  # the verdict goes to stderr: keep it after the report
 	if failed:
 		print(
-			"FAIL: the billing re-check was not proven against this code. Review the listed segments before "
-			"pinning this version (see fuelbuddy_crm/billing_recheck/fingerprint_pins.json).",
+			f"FAIL: {' and '.join(failed)} {'does' if len(failed) == 1 else 'do'} not match the pins. The "
+			f"billing re-check was not proven against this code, so do not deploy this update yet ({README}).",
 			file=sys.stderr,
 		)
 		return 1
+	print("PASS: this is the ERPNext and Frappe code the billing re-check was proven against.")
 	return 0
 
 

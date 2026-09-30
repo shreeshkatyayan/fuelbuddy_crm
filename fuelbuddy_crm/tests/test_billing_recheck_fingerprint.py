@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Fuelbuddy and contributors
 # For license information, please see license.txt
 
-"""The upgrade guard's fingerprint and the CI script scripts/check_billing_walk_fingerprint.py (IDEV-3268).
+"""The upgrade guard's fingerprint and the pre-deploy check scripts/check_billing_walk_fingerprint.py (IDEV-3268).
 
 Pure: no site needed (``python -m unittest fuelbuddy_crm.tests.test_billing_recheck_fingerprint``).
 It also checks real checkouts when it can find them (tests/stock_code.py): the erpnext / frappe this
@@ -195,6 +195,56 @@ class TestDbDriver(unittest.TestCase):
 		)
 
 
+# frappe's pyproject.toml as frappe 15 requires its database driver (plus a typing stub that is not one)
+FRAPPE_PYPROJECT = textwrap.dedent(
+	"""
+	[project]
+	name = "frappe"
+	dependencies = [
+	    # do NOT add loose requirements on PyMySQL versions.
+	    "PyMySQL==1.1.1",
+	]
+
+	[project.optional-dependencies]
+	dev = ["types-PyMySQL"]
+	"""
+)
+FRAPPE_16_DRIVERS = '"PyMySQL==1.1.2",\n    "mysqlclient==2.2.7",'
+
+
+class TestDeclaredDrivers(unittest.TestCase):
+	"""The database drivers a frappe checkout's pyproject.toml installs (the pre-deploy check)."""
+
+	def drivers(self, text):
+		root = pathlib.Path(tempfile.mkdtemp())
+		self.addCleanup(shutil.rmtree, root)
+		if text is not None:
+			(root / "pyproject.toml").write_text(text)
+		return fp.declared_drivers(root)
+
+	def test_frappe_15_and_16(self):
+		self.assertEqual(self.drivers(FRAPPE_PYPROJECT), [("PyMySQL", "1.1.1")])
+		frappe_16 = FRAPPE_PYPROJECT.replace('"PyMySQL==1.1.1",', FRAPPE_16_DRIVERS)
+		self.assertEqual(self.drivers(frappe_16), [("PyMySQL", "1.1.2"), ("mysqlclient", "2.2.7")])
+
+	def test_requirement_forms(self):
+		for requirement, expected in (
+			('"PyMySQL == 1.1.1"', ("PyMySQL", "1.1.1")),
+			('"pymysql==1.1.1"', ("PyMySQL", "1.1.1")),
+			('"PyMySQL[rsa]==1.1.1"', ("PyMySQL", "1.1.1")),
+			("'mysqlclient==2.2.7; sys_platform != \"win32\"'", ("mysqlclient", "2.2.7")),
+			('"PyMySQL>=1.1,<2"', ("PyMySQL", ">=1.1,<2")),  # not a version: no pin matches it
+			('"PyMySQL===1.1.1"', ("PyMySQL", "===1.1.1")),
+			('"PyMySQL"', ("PyMySQL", "(no version)")),
+		):
+			with self.subTest(requirement=requirement):
+				self.assertEqual(self.drivers(f"dependencies = [{requirement}]\n"), [expected])
+
+	def test_what_is_not_a_driver_requirement(self):
+		self.assertEqual(self.drivers('# "PyMySQL==9.9"\ndev = ["types-PyMySQL", "types-mysqlclient"]\n'), [])
+		self.assertIsNone(self.drivers(None))
+
+
 def _write_checkout(root, app, bodies=None):
 	"""A minimal checkout with every module the segments name; ``bodies``: {module key: source}."""
 	modules, _segments = fp.APPS[app]
@@ -205,6 +255,8 @@ def _write_checkout(root, app, bodies=None):
 		path.parent.mkdir(parents=True, exist_ok=True)
 		if not path.exists():
 			path.write_text((bodies or {}).get(key, "x = 1\n"))
+	if app == "frappe":
+		(root / "pyproject.toml").write_text(FRAPPE_PYPROJECT)
 
 
 class TestScript(unittest.TestCase):
@@ -253,6 +305,56 @@ class TestScript(unittest.TestCase):
 		code, output = self.run_script(*self.args())
 		self.assertEqual(code, 0, output)
 
+	def test_summary(self):
+		code, output = self.run_script(*self.args())
+		self.assertEqual(code, 0, output)
+		self.assertIn(
+			f"erpnext 0.0.1: ok ({len(fp.ERPNEXT_SEGMENTS)} code segments, 2 callers of {fp.WALK})", output
+		)
+		self.assertIn(
+			f"frappe 0.0.1: ok ({len(fp.FRAPPE_SEGMENTS)} code segments, database driver PyMySQL 1.1.1)",
+			output,
+		)
+		self.assertTrue(
+			output.rstrip().endswith(
+				"PASS: this is the ERPNext and Frappe code the billing re-check was proven against."
+			),
+			output,
+		)
+
+	def test_drivers_the_update_installs_must_be_pinned(self):
+		pinned = "(pinned: PyMySQL 1.1.1)"
+		for text, reason in (
+			(
+				FRAPPE_PYPROJECT.replace("PyMySQL==1.1.1", "PyMySQL==1.1.2"),
+				f"frappe:db driver PyMySQL 1.1.2 not pinned {pinned}",
+			),
+			(
+				FRAPPE_PYPROJECT.replace('"PyMySQL==1.1.1",', FRAPPE_16_DRIVERS),
+				f"frappe:db driver mysqlclient 2.2.7 not pinned {pinned}",
+			),
+			(
+				FRAPPE_PYPROJECT.replace("PyMySQL==1.1.1", "PyMySQL>=1.1"),
+				f"frappe:db driver PyMySQL >=1.1 not pinned {pinned}",
+			),
+			(
+				'[project]\nname = "frappe"\n',
+				"frappe:pyproject.toml requires no known database driver (PyMySQL, mysqlclient)",
+			),
+		):
+			with self.subTest(reason=reason):
+				(self.frappe / "pyproject.toml").write_text(text)
+				code, output = self.run_script(*self.args())
+				self.assertEqual(code, 1, output)
+				self.assertIn(reason, output)
+				self.assertIn("FAIL: frappe does not match the pins.", output)
+
+	def test_missing_pyproject_fails(self):
+		(self.frappe / "pyproject.toml").unlink()
+		code, output = self.run_script(*self.args())
+		self.assertEqual(code, 1, output)
+		self.assertIn("frappe:no pyproject.toml, so the database driver it installs is unknown", output)
+
 	def test_package_directory_is_accepted(self):
 		code, output = self.run_script(
 			"--erpnext", str(self.erpnext / "erpnext"), "--frappe", str(self.frappe), "--pins", str(self.pins)
@@ -265,6 +367,8 @@ class TestScript(unittest.TestCase):
 		code, output = self.run_script(*self.args())
 		self.assertEqual(code, 1)
 		self.assertIn("erpnext:delivery_note.update_billed_amount_based_on_so", output)
+		self.assertIn("FAIL: erpnext does not match the pins.", output)
+		self.assertIn('README.md, "Before any ERPNext or Frappe update"', output)
 
 	def test_reformatting_passes(self):
 		dn = self.erpnext / fp.ERPNEXT_MODULES["delivery_note"]
@@ -300,9 +404,17 @@ class TestScript(unittest.TestCase):
 
 	def test_usage_errors(self):
 		self.assertEqual(self.run_script("--erpnext", str(self.erpnext))[0], 2)
-		self.assertEqual(
-			self.run_script("--erpnext", str(self.tmp / "nope"), "--frappe", str(self.frappe))[0], 2
-		)
+		code, output = self.run_script("--erpnext", str(self.tmp / "nope"), "--frappe", str(self.frappe))
+		self.assertEqual(code, 2)
+		self.assertIn("FAIL: the check could not run. Do not deploy until it passes", output)
+
+	def test_both_apps_failing(self):
+		(self.frappe / "frappe" / "__init__.py").write_text('__version__ = "0.0.2"\n')
+		dn = self.erpnext / fp.ERPNEXT_MODULES["delivery_note"]
+		dn.write_text(dn.read_text().replace("return [so_detail]", "return []"))
+		code, output = self.run_script(*self.args())
+		self.assertEqual(code, 1)
+		self.assertIn("FAIL: erpnext and frappe do not match the pins.", output)
 
 	def test_print(self):
 		code, output = self.run_script(*self.args(), "--print")

@@ -11,7 +11,9 @@ to 3.14 add or show empty AST fields differently) do not change it. Any change t
 
 The accepted fingerprints are pinned per app version in ``fingerprint_pins.json``. A version that is not
 pinned, or any segment that differs from the pin for that version, is a mismatch: the runtime guard
-then runs stock ERPNext code, and the CI script fails.
+then runs stock ERPNext code, and the CI script fails. The same goes for the database driver
+(``runtime.db_driver``): the guard checks the driver of each site's live connection, the script every
+driver frappe's pyproject.toml installs.
 """
 
 import ast
@@ -19,6 +21,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 
 ABSENT = "ABSENT"
 PINS_FILE = pathlib.Path(__file__).with_name("fingerprint_pins.json")
@@ -383,9 +386,49 @@ def driver_mismatches(driver, version, pins=None):
 	return []
 
 
+# a requirement string naming a driver, e.g. "PyMySQL==1.1.1" or 'mysqlclient>=2.2; sys_platform...'
+_DRIVER_REQUIREMENT = re.compile(
+	r"""["'](PyMySQL|mysqlclient)\s*(?:\[[^\]]*\])?\s*([^"';]*)""", re.IGNORECASE
+)
+
+
+def declared_drivers(root):
+	"""Sorted (driver, version) for each database driver requirement in ``<root>/pyproject.toml`` (whole
+	line comments skipped), or None without the file. A bench installs frappe's requirements as written
+	(frappe pins its drivers exactly); ``version`` is the version of an ``==`` pin, else the specifier as
+	written, which no pin matches."""
+	path = pathlib.Path(root, "pyproject.toml")
+	if not path.is_file():
+		return None
+	text = "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+	names = {name.lower(): name for name, _attribute in DB_DRIVERS.values()}
+	found = set()
+	for name, spec in _DRIVER_REQUIREMENT.findall(text):
+		spec = spec.strip()
+		exact = spec.startswith("==") and not spec.startswith("===")
+		found.add((names[name.lower()], spec[2:].strip() if exact else spec or "(no version)"))
+	return sorted(found)
+
+
+def declared_driver_mismatches(root, pins=None):
+	"""Every database driver frappe's pyproject.toml installs must be pinned at that version: which one
+	a site connects with is its own configuration (frappe 16: use_mysqlclient)."""
+	declared = declared_drivers(root)
+	if declared is None:
+		return ["frappe:no pyproject.toml, so the database driver it installs is unknown"]
+	if not declared:
+		return ["frappe:pyproject.toml requires no known database driver (PyMySQL, mysqlclient)"]
+	return [
+		f"frappe:{reason}"
+		for driver, version in declared
+		for reason in driver_mismatches(driver, version, pins)
+	]
+
+
 def check_checkout(root, app, pins=None, scan_callers=True):
-	"""Full check of one checkout: version pinned, every segment equal, and (erpnext) the walk has
-	exactly the pinned number of callers in the whole package. Returns (version, hashes, mismatches)."""
+	"""Full check of one checkout: version pinned, every segment equal, (erpnext) the walk has exactly
+	the pinned number of callers in the whole package, and (frappe) every database driver it installs is
+	pinned. Returns (version, hashes, mismatches)."""
 	pins = pins or load_pins()
 	version = app_version(root, app)
 	hashes = fingerprints(parse_modules(root, app), app)
@@ -397,4 +440,6 @@ def check_checkout(root, app, pins=None, scan_callers=True):
 			mismatches.append(
 				f"{app}:{WALK} has {total} callers, pinned {pinned['callers']} ({', '.join(where)})"
 			)
+	if app == "frappe":
+		mismatches += declared_driver_mismatches(root, pins)
 	return version, hashes, mismatches

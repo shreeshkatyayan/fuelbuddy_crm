@@ -2,7 +2,7 @@
  "_about": [
   "Accepted fingerprints of the ERPNext / frappe code the billing re-check relies on, per app version (billing_recheck/fingerprint.py).",
   "Add a version only after reviewing every segment that differs from a version already pinned; paste the block printed by scripts/check_billing_walk_fingerprint.py --print.",
-  "runtime.db_driver: the database drivers (named as pip names them) and versions the write-skip rule is proven for. The guard checks the driver of each site's connection. Add one only after the decimal write probe passed on it."
+  "runtime.db_driver: the database drivers (named as pip names them) and versions the write-skip rule is proven for. The guard checks the driver of each site's connection; the script checks every driver frappe's pyproject.toml installs. Add one only after a test on a site using it shows it stores billed amounts exactly as fifo.written_decimal predicts."
  ],
  "erpnext": {
   "15.96.0": {
