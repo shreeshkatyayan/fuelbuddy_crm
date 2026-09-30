@@ -26,6 +26,7 @@ import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.tests.utils import FrappeTestCase
 
+from fuelbuddy_crm import dn_key_columns
 from fuelbuddy_crm.dn_validation import LIVE_KEY_FIELD, STAMP_FIELD
 from fuelbuddy_crm.patches import add_dn_live_invoiced_item_key
 
@@ -268,3 +269,14 @@ class TestDeliveryNoteLiveKey(FrappeTestCase):
 			frappe.db.get_column_index(table, STAMP_FIELD, unique=False)
 			or frappe.db.get_column_index(table, STAMP_FIELD, unique=True)
 		)
+
+	def test_the_key_column_step_readies_both_columns_and_then_only_reads(self):
+		"""dn_key_columns adds IDEV-3266's custom_qc_idempotency_key in the same step, so that patch
+		finds its column in place; once the table is ready, the step runs no ALTER."""
+		db = dn_key_columns.FrappeDB()
+		dn_key_columns.ensure(db, log=lambda *args: None)  # completes a site set up before the step
+
+		self.assertEqual(dn_key_columns.ensure(db, log=lambda *args: None), [])
+		self.assertEqual(dn_key_columns.unready(dn_key_columns.read_state(db)), [])
+		for column in dn_key_columns.KEY_COLUMNS:
+			self.assertTrue(frappe.db.get_column_index("tabDelivery Note", column, unique=True), column)
