@@ -8,6 +8,11 @@ what is not billed yet. ERPNext marks a DN billed for part of its value ``Partia
 ``Partly Billed`` the filter used to name is the Purchase Receipt status); the rebuild must take that
 DN's unbilled remainder, and nothing once the DN is fully billed.
 
+With the site switch ``invoice_rebuild_by_litres`` on (patched on here, whatever the site says),
+"not billed yet" is counted in litres: a DN whose litres are all invoiced at another rate is not
+offered, and a part-invoiced DN offers exactly its remaining litres. The same cases run without a
+site in test_rebuild_litres_pure.
+
 Needs erpnext + fuelbuddy_crm and a company (setup wizard done). The production-only schema the
 Delivery Note and Sales Invoice hooks read is stood in by ``ensure_prod_schema``, only where missing,
 so on a production copy it changes nothing. Kept self-contained so this fix does not wait on the
@@ -16,6 +21,8 @@ its own customer.
 
     bench --site <site> run-tests --app fuelbuddy_crm --module fuelbuddy_crm.tests.test_manual_invoice_rebuild
 """
+
+from unittest.mock import patch
 
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
@@ -29,6 +36,7 @@ RATE = 3.51
 STOCK_DATE = "2026-01-01"
 FUEL_GROUP = "Fuel"  # the transaction type on fuel documents
 DN_FROM, DN_TO = "2026-08-01", "2026-08-31"  # the manual invoice's DN window
+LITRES_SWITCH = "fuelbuddy_crm.auto_invoicing.litres_rebuild_enabled"
 
 # Child DocTypes that crm fixtures reference as Table fields; installed by other apps in
 # production. Loading a Customer / Sales Order fails without them.
@@ -248,10 +256,11 @@ def make_delivery_note(party, lines, posting_date):
 	return dn
 
 
-def make_sales_invoice(so, submit=False, qty=None):
+def make_sales_invoice(so, submit=False, qty=None, rate=None):
 	"""An invoice on ``so`` for the DN window, mapped from the SO the way a user raises one.
 	Without ``qty`` it is the MANUAL period invoice (lines rebuilt from the DNs by the hook under
-	test); with ``qty`` its one line bills exactly that and the rebuild is skipped."""
+	test); with ``qty`` its one line bills exactly that (at ``rate`` when given: a discount or a
+	price change) and the rebuild is skipped."""
 	from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice as map_invoice
 
 	si = map_invoice(so.name)
@@ -261,6 +270,8 @@ def make_sales_invoice(so, submit=False, qty=None):
 	si.set_posting_time = 1
 	if qty is not None:
 		si.items[0].qty = qty
+		if rate is not None:
+			si.items[0].rate = rate
 		si.flags.fb_auto_invoicing = True
 	si.insert(ignore_permissions=True)
 	if submit:
@@ -316,3 +327,33 @@ class TestManualInvoiceRebuild(FrappeTestCase):
 
 		with self.assertRaisesRegex(frappe.ValidationError, "No Delivery Notes found"):
 			make_sales_invoice(so)
+
+	def test_litres_fully_invoiced_at_a_discount_are_not_offered(self):
+		"""Every litre invoiced at a discounted rate: ERPNext leaves the DN Partially Billed (1,280 of
+		1,404 billed). Counting litres nothing is left; counting amounts ~35.33 L would be offered."""
+		so = make_sales_order(self.party, 1000)
+		dn = make_delivery_note(self.party, [(so, 400)], "2026-08-15")
+		make_sales_invoice(so, submit=True, qty=400, rate=3.20)
+		self.assertEqual(dn_status(dn), "Partially Billed")
+
+		with patch(LITRES_SWITCH, return_value=True):
+			with self.assertRaisesRegex(frappe.ValidationError, "No Delivery Notes found"):
+				make_sales_invoice(so)
+		with patch(LITRES_SWITCH, return_value=False):
+			[(so_detail, qty)] = self.lines(make_sales_invoice(so))
+		self.assertEqual(so_detail, so.items[0].name)
+		self.assertAlmostEqual(qty, 400 * (1404 - 1280) / 1404, places=2)
+
+	def test_litres_part_invoiced_dn_offers_only_its_remaining_litres(self):
+		"""300 of 400 L invoiced at a higher price (1,170 of 1,404 billed): the manual invoice takes
+		the 100 L left, not the 66.67 L the unbilled amount would give."""
+		so = make_sales_order(self.party, 1000)
+		dn = make_delivery_note(self.party, [(so, 400)], "2026-08-15")
+		make_sales_invoice(so, submit=True, qty=300, rate=3.90)
+		self.assertEqual(dn_status(dn), "Partially Billed")
+
+		with patch(LITRES_SWITCH, return_value=True):
+			si = make_sales_invoice(so, submit=True)
+			self.assertEqual(self.lines(si), [(so.items[0].name, 100)])
+			with self.assertRaisesRegex(frappe.ValidationError, "No Delivery Notes found"):
+				make_sales_invoice(so)
