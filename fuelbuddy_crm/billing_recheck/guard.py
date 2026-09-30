@@ -10,18 +10,23 @@ fingerprint_pins.json. ``ok()`` is True only when all of this holds, else the ca
   erpnext version);
 - the delivery_note / sales_invoice modules this process imported are the files that were hashed, and
   the stock walk the re-check falls back to is that module's own function;
-- PyMySQL is the pinned version (it formats the floats the 2**23 write-skip rule relies on);
+- this site's database connection runs a pinned driver at a pinned version (fingerprint.DB_DRIVERS;
+  the driver formats the floats the 2**23 write-skip rule relies on). frappe 16 connects with
+  mysqlclient unless the site sets use_mysqlclient: 0, and mysqlclient is not pinned; an unknown driver,
+  or no connection, is a mismatch too;
 - on this site, frappe resolves Delivery Note and Sales Invoice to ERPNext's own classes (no
-  override_doctype_class / extend_doctype_class), and every method the re-check relies on is defined by
-  the class that was hashed.
+  override_doctype_class / extend_doctype_class), and every method the re-check relies on, line_guard's
+  premise (update_qty, _update_children) included, is defined by the class that was hashed.
 
 The code part is computed once per process on first use (about 0.1 s) and hashes the files right
-after the modules were imported; the class part once per site. A mismatch is logged once per process
-and raises one deferred Error Log per hour.
+after the modules were imported; the class part once per site; the driver part once per connection
+class (frappe 16 picks the driver per site). A mismatch is logged once per process and raises one
+deferred Error Log per hour.
 """
 
 import inspect
 import os
+import sys
 
 import frappe
 
@@ -30,6 +35,7 @@ from fuelbuddy_crm.billing_recheck import observe
 
 _CODE = {}
 _CLASSES = {}
+_DRIVERS = {}
 
 
 def ok():
@@ -37,7 +43,7 @@ def ok():
 
 
 def mismatches():
-	out = list(code_result()["mismatch"]) + list(class_result())
+	out = list(code_result()["mismatch"]) + list(class_result()) + list(driver_result()["mismatch"])
 	if out:
 		observe.warn_once(
 			"guard:" + ",".join(out),
@@ -65,10 +71,19 @@ def class_result():
 	return _CLASSES[site]
 
 
+def driver_result():
+	"""{"driver", "version", "mismatch"} for this site's database connection (frappe.db)."""
+	conn = getattr(getattr(frappe.local, "db", None), "_conn", None)
+	if type(conn) not in _DRIVERS:
+		_DRIVERS[type(conn)] = _check_driver(conn)
+	return _DRIVERS[type(conn)]
+
+
 def reset():
 	"""Forget the cached results (tests)."""
 	_CODE.clear()
 	_CLASSES.clear()
+	_DRIVERS.clear()
 
 
 def modules():
@@ -84,7 +99,6 @@ def _check_code():
 	mismatch, versions = [], {}
 	try:
 		import erpnext
-		import pymysql
 
 		pins = fp.load_pins()
 		roots = {}
@@ -114,14 +128,17 @@ def _check_code():
 			and os.path.samefile(stock.__code__.co_filename, inspect.getsourcefile(dn_mod))
 		):
 			mismatch.append(f"stock walk is not ERPNext's own function: {stock!r}")
-
-		# VERSION_STRING, not __version__: PyMySQL sets __version__ to a MySQLdb-compatible "1.4.6"
-		versions["pymysql"] = getattr(pymysql, "VERSION_STRING", None)
-		if versions["pymysql"] not in pins["runtime"]["pymysql"]:
-			mismatch.append(f"pymysql {versions['pymysql']} not pinned")
 	except Exception as exc:  # cannot prove equality -> stock
 		mismatch.append(f"error:{exc!r}")
 	return {"mismatch": mismatch, "versions": versions}
+
+
+def _check_driver(conn):
+	try:
+		driver, version = fp.connection_driver(conn, sys.modules)
+		return {"driver": driver, "version": version, "mismatch": fp.driver_mismatches(driver, version)}
+	except Exception as exc:  # cannot prove the driver -> stock
+		return {"driver": None, "version": None, "mismatch": [f"error:{exc!r}"]}
 
 
 # (attribute, owner class name) the re-check relies on; "absent" must not be defined anywhere in the MRO
@@ -130,6 +147,8 @@ _DN_OWNERS = (
 	("on_submit", "DeliveryNote"),
 	("on_cancel", "DeliveryNote"),
 	("update_prevdoc_status", "StatusUpdater"),
+	("update_qty", "StatusUpdater"),  # line_guard's premise
+	("_update_children", "StatusUpdater"),  # line_guard's premise
 	("update_billing_percentage", "StockController"),
 	("_update_percent_field", "StatusUpdater"),
 	("_update_modified", "StatusUpdater"),
@@ -141,6 +160,8 @@ _SI_OWNERS = (
 	("on_submit", "SalesInvoice"),
 	("on_cancel", "SalesInvoice"),
 	("update_prevdoc_status", "StatusUpdater"),
+	("update_qty", "StatusUpdater"),  # line_guard's premise
+	("_update_children", "StatusUpdater"),  # line_guard's premise
 )
 
 

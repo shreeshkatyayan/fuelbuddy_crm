@@ -34,6 +34,11 @@ catches the race; nothing has been written, so the caller can simply retry. When
 snapshot already holds everything committed on the line, and the lock keeps it so until this
 transaction ends. The lock is the one ERPNext takes later anyway, taken a little earlier.
 
+That premise is pinned: the upgrade guard fingerprints StatusUpdater.update_qty and _update_children
+(the code that writes the row) and checks that nothing overrides them, so an ERPNext change there fails
+the pre-deploy check and switches the re-check off. This check keeps running either way: it only ever
+refuses, and stock code has the same race.
+
 Not covered: a change that does not write the Sales Order Item row (a credit note without
 update_billed_amount_in_sales_order still enters the walk's invoiced sum; a direct SQL write), and a
 draft invoice save (its allocation stays as dn_invoice_link documents it). Switched off, nothing here

@@ -106,12 +106,14 @@ def status():
 	frappe.only_for("System Manager")
 	from fuelbuddy_crm.billing_recheck import bulk, config, guard
 
+	driver = guard.driver_result()
 	return {
 		"switches": config.snapshot(),
 		"installed": installed(),
 		"guard_ok": guard.ok(),
 		"guard_mismatch": guard.mismatches(),
 		"versions": guard.code_result().get("versions"),
+		"db_driver": {"driver": driver.get("driver"), "version": driver.get("version")},
 		"bulk_gaps": bulk.safe_gap_reasons(),
 		"counters": observe.counters(),
 		"paths": list(observe.PATHS),

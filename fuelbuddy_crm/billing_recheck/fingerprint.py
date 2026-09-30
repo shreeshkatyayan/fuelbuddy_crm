@@ -78,6 +78,11 @@ ERPNEXT_SEGMENTS = {
 		"status_updater",
 		"StatusUpdater.update_prevdoc_status",
 	),
+	# line_guard's premise: every committed Delivery Note / Sales Invoice event writes its Sales Order
+	# Item rows (update_prevdoc_status -> update_qty -> _update_children: ``update ... set <field> =
+	# <sum>``), so a row that differs between the snapshot and the locked read is an event it misses
+	"status_updater.StatusUpdater.update_qty": ("status_updater", "StatusUpdater.update_qty"),
+	"status_updater.StatusUpdater._update_children": ("status_updater", "StatusUpdater._update_children"),
 	# a return's items carry the so_detail / dn_detail of the DN they return
 	"delivery_note.make_sales_return": ("delivery_note", "make_sales_return"),
 	"sales_and_purchase_return.make_return_doc": ("sales_and_purchase_return", "make_return_doc"),
@@ -333,6 +338,49 @@ def compare(app, version, hashes, pins=None):
 def _differing(hashes, expected):
 	out = [key for key in sorted(expected) if hashes.get(key) != expected[key]]
 	return out + [f"{key} (not pinned)" for key in sorted(set(hashes) - set(expected))]
+
+
+# ---- database driver -------------------------------------------------------------------------------
+# Every value the re-check writes goes through frappe's database driver, and the 2**23 write-skip rule
+# (billing_recheck.fifo.written_decimal) is proven only for how the pinned driver formats a float.
+# frappe 15 connects to MariaDB with PyMySQL only; frappe 16 uses mysqlclient unless the site sets
+# use_mysqlclient: 0. The pins name drivers as pip and frappe's pyproject.toml do:
+# "runtime": {"db_driver": {"PyMySQL": ["1.1.1"]}}.
+# top-level package of a connection class -> (driver name, the package attribute holding its version)
+DB_DRIVERS = {
+	"pymysql": ("PyMySQL", "VERSION_STRING"),  # not __version__: that is a MySQLdb-compatible "1.4.6"
+	"MySQLdb": ("mysqlclient", "version_info"),  # a tuple, e.g. (2, 2, 7, "final", 0)
+}
+
+
+def connection_driver(conn, modules):
+	"""(driver, version) of the database connection ``conn``, read from the package that defines its
+	class (looked up in ``modules``, i.e. sys.modules). Any other connection comes back as (its class
+	path, None), and a missing one as ("no connection", None); driver_mismatches rejects both."""
+	if conn is None:
+		return "no connection", None
+	cls = type(conn)
+	package = cls.__module__.partition(".")[0]
+	if package not in DB_DRIVERS:
+		return f"{cls.__module__}.{cls.__qualname__}", None
+	driver, attribute = DB_DRIVERS[package]
+	version = getattr(modules.get(package), attribute, None)
+	if isinstance(version, tuple):
+		version = ".".join(str(part) for part in version[:3])
+	return driver, version
+
+
+def driver_mismatches(driver, version, pins=None):
+	"""[] when ``driver`` ``version`` is pinned (pins["runtime"]["db_driver"]), else the reason: an
+	unknown driver, a driver that is not pinned and a version that is not pinned all count."""
+	pins = pins or load_pins()
+	pinned = pins.get("runtime", {}).get("db_driver", {})
+	if driver not in {name for name, _attribute in DB_DRIVERS.values()}:
+		return [f"db driver unknown: {driver}"]
+	if version not in pinned.get(driver, []):
+		accepted = ", ".join(f"{name} {v}" for name in sorted(pinned) for v in pinned[name]) or "none"
+		return [f"db driver {driver} {version} not pinned (pinned: {accepted})"]
+	return []
 
 
 def check_checkout(root, app, pins=None, scan_callers=True):

@@ -17,8 +17,11 @@ import io
 import json
 import pathlib
 import shutil
+import sqlite3
+import sys
 import tempfile
 import textwrap
+import types
 import unittest
 
 from fuelbuddy_crm.billing_recheck import fingerprint as fp
@@ -26,6 +29,7 @@ from fuelbuddy_crm.tests.stock_code import checkout_root
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "check_billing_walk_fingerprint.py"
+DRIVER_PINS = {"runtime": {"db_driver": {"PyMySQL": ["1.1.1"]}}}
 
 
 def load_script():
@@ -107,6 +111,21 @@ class TestPins(unittest.TestCase):
 					self.assertEqual(set(pinned["segments"]), set(segments))
 		self.assertEqual(pins["erpnext"]["15.96.0"]["callers"], 2)
 
+	def test_line_guard_premise_is_pinned(self):
+		for key in (
+			"status_updater.StatusUpdater.update_qty",
+			"status_updater.StatusUpdater._update_children",
+		):
+			with self.subTest(key=key):
+				self.assertIn(key, fp.ERPNEXT_SEGMENTS)
+				self.assertNotEqual(fp.load_pins()["erpnext"]["15.96.0"]["segments"][key], fp.ABSENT)
+
+	def test_db_driver_pins(self):
+		pinned = fp.load_pins()["runtime"]["db_driver"]
+		# a misspelt driver name would never match, and the guard would stay off everywhere
+		self.assertLessEqual(set(pinned), {name for name, _attribute in fp.DB_DRIVERS.values()})
+		self.assertIn("1.1.1", pinned["PyMySQL"])  # prod's driver (frappe 15.x requires PyMySQL==1.1.1)
+
 	def test_compare(self):
 		pins = {
 			"frappe": {"1.0": {"segments": {"a": "x", "b": "y"}}, "2.0": {"segments": {"a": "z", "b": "y"}}}
@@ -116,6 +135,64 @@ class TestPins(unittest.TestCase):
 		unpinned = fp.compare("frappe", "3.0", {"a": "z", "b": "w"}, pins)
 		self.assertIn("not pinned", unpinned[0])
 		self.assertEqual(unpinned[1], "frappe:differs from pinned 2.0 in: b")
+
+
+def connection(module):
+	"""A connection object whose class is defined in ``module``, as a driver's own class is."""
+	return type("Connection", (), {"__module__": module})()
+
+
+class TestDbDriver(unittest.TestCase):
+	"""Which database driver a connection runs, and whether it is pinned."""
+
+	def setUp(self):
+		# PyMySQL 1.1.1 and mysqlclient 2.2.7 as they show their versions
+		self.modules = {
+			"pymysql": types.SimpleNamespace(
+				VERSION_STRING="1.1.1", __version__="1.4.6", version_info=(1, 4, 6, "final", 1)
+			),
+			"MySQLdb": types.SimpleNamespace(version_info=(2, 2, 7, "final", 0)),
+		}
+
+	def driver(self, module):
+		return fp.connection_driver(connection(module), self.modules)
+
+	def test_pymysql_version_is_its_own_not_the_mysqldb_compatible_one(self):
+		self.assertEqual(self.driver("pymysql.connections"), ("PyMySQL", "1.1.1"))
+
+	def test_mysqlclient(self):
+		self.assertEqual(self.driver("MySQLdb.connections"), ("mysqlclient", "2.2.7"))
+
+	def test_pymysql_installed_as_mysqldb_is_still_pymysql(self):
+		self.modules["MySQLdb"] = self.modules["pymysql"]  # pymysql.install_as_MySQLdb()
+		self.assertEqual(self.driver("pymysql.connections"), ("PyMySQL", "1.1.1"))
+
+	def test_unknown_or_missing_connection(self):
+		self.assertEqual(fp.connection_driver(None, self.modules), ("no connection", None))
+		conn = sqlite3.connect(":memory:")
+		self.addCleanup(conn.close)
+		self.assertEqual(fp.connection_driver(conn, sys.modules), ("sqlite3.Connection", None))
+		self.assertEqual(self.driver("psycopg2.extensions"), ("psycopg2.extensions.Connection", None))
+
+	def test_driver_package_not_loaded(self):
+		self.assertEqual(fp.connection_driver(connection("MySQLdb.connections"), {}), ("mysqlclient", None))
+
+	def test_mismatches(self):
+		pinned = "(pinned: PyMySQL 1.1.1)"
+		for (driver, version), expected in (
+			(("PyMySQL", "1.1.1"), []),
+			(("PyMySQL", "1.1.2"), [f"db driver PyMySQL 1.1.2 not pinned {pinned}"]),
+			(("PyMySQL", None), [f"db driver PyMySQL None not pinned {pinned}"]),
+			(("mysqlclient", "2.2.7"), [f"db driver mysqlclient 2.2.7 not pinned {pinned}"]),
+			(("no connection", None), ["db driver unknown: no connection"]),
+			(("sqlite3.Connection", None), ["db driver unknown: sqlite3.Connection"]),
+		):
+			with self.subTest(driver=driver, version=version):
+				self.assertEqual(fp.driver_mismatches(driver, version, DRIVER_PINS), expected)
+		self.assertEqual(
+			fp.driver_mismatches("PyMySQL", "1.1.1", {"runtime": {}}),
+			["db driver PyMySQL 1.1.1 not pinned (pinned: none)"],
+		)
 
 
 def _write_checkout(root, app, bodies=None):
@@ -157,7 +234,7 @@ class TestScript(unittest.TestCase):
 				"0.0.1": {"callers": 2, "segments": fp.check_checkout(self.erpnext, "erpnext", {})[1]}
 			},
 			"frappe": {"0.0.1": {"segments": fp.check_checkout(self.frappe, "frappe", {})[1]}},
-			"runtime": {"pymysql": ["1.1.1"]},
+			**DRIVER_PINS,
 		}
 		self.pins = self.tmp / "pins.json"
 		self.pins.write_text(json.dumps(pins))
