@@ -73,8 +73,15 @@ after it (``DEADLINE``).
     NOT_LIVE_DN, SO_CLOSED, INVOICED, PERIOD_CLOSED, DEADLINE, SO_HEADROOM, ERP_VALIDATION  final
     LOCK_RETRY (timestamp mismatch, lock wait, deadlock, Sales Order lines changed)         retry
 
-ERP wallet / credit limit are out of scope (IDEV-3266): not live in ERP. If either is switched
-on, revisit — both run as validate hooks on every Delivery Note save and could refuse an amend.
+ERP wallet (owner decision, 29 Sep 2026; fuelbuddy_crm.qc_wallet): never refuses a correction. The
+Delivery Note the amend saves or reissues carries ``doc.flags[qc_wallet.QC_AMEND_FLAG]``, so
+fuelbuddy_wallet's validate hook lets it through while its recompute hooks still book it, even
+below zero. When the change leaves the customer's ERP wallet below zero, one Issue per episode is
+raised in this same transaction, assigned to finance, and the answer says ``wallet_below_zero``; the
+DN Amend Log keeps it, so a retry and the plan say it too.
+
+The credit limit is still out of scope: its validate hook (fuelbuddy_creditlimit
+check_delivery_note) can refuse an amend while it is switched on.
 """
 
 import math
@@ -91,7 +98,7 @@ from erpnext.accounts.doctype.accounting_period.accounting_period import (
 from frappe import _
 from frappe.utils import flt, get_system_timezone, strip_html
 
-from fuelbuddy_crm import so_allocator
+from fuelbuddy_crm import qc_wallet, so_allocator
 from fuelbuddy_crm.dn_invoice_link import LINK_FIELD, QTY_FIELD, covering_invoices, window_invoices
 from fuelbuddy_crm.dn_validation import qty_by_so_line, so_headroom_shortfalls
 from fuelbuddy_crm.dn_versioning import QC_IDEMPOTENCY_KEY_FIELD as KEY_FIELD
@@ -184,10 +191,25 @@ def _amend(name, target, key, cutoff, so_lines):
 	doc = frappe.get_doc("Delivery Note", name)
 	_check_locked({row.so_detail for row in doc.items}, so_lines)
 	_check_sales_orders_open(doc)
+	from_qty = sum(so_allocator.line_litres(row) for row in doc.items)
 	if doc.docstatus == 0:
 		result = _amend_draft(doc, target, key, so_lines)
 	else:
 		result = _amend_submitted(doc, target, key, so_lines)
+
+	# fuelbuddy_wallet's recompute hooks booked the change above, in this transaction. A wallet it
+	# leaves below zero raises the overshoot Issue here, so the Issue commits with the change.
+	result["wallet_below_zero"] = qc_wallet.after_amend(
+		key,
+		frappe._dict(
+			customer=doc.customer,
+			delivery_note=name,
+			result=result["result"],
+			new_delivery_note=result["new_delivery_note"],
+			from_qty=from_qty,
+			target_qty=target,
+		),
+	)
 
 	frappe.get_doc(
 		{
@@ -199,6 +221,7 @@ def _amend(name, target, key, cutoff, so_lines):
 			"custom_version": result["custom_version"],
 			"grand_total": result["grand_total"],
 			"target_qty": target,
+			"wallet_below_zero": int(result["wallet_below_zero"]),
 		}
 	).insert(ignore_permissions=True)
 
@@ -248,6 +271,7 @@ def _amend_draft(doc, target, key, so_lines):
 	_renumber(doc)
 	_refuse_on_headroom(doc)
 	doc.set(KEY_FIELD, key)  # replaces a previous episode's key: the key marks the live DN
+	doc.flags[qc_wallet.QC_AMEND_FLAG] = True  # the ERP wallet never refuses a correction
 	doc.save()
 	return _ok(
 		DRAFT_UPDATED,
@@ -297,6 +321,7 @@ def _build_amendment(original, lines, key):
 	amendment.set(KEY_FIELD, key)
 	amendment.flags.qc_idempotency_key = key  # drop_copied_idempotency_key keeps it
 	amendment.flags.qc_replaced_qty = qty_by_so_line(original)  # so_headroom_shortfalls
+	amendment.flags[qc_wallet.QC_AMEND_FLAG] = True  # the ERP wallet never refuses a correction
 	amendment.set(LINK_FIELD, None)
 	amendment.set(QTY_FIELD, 0)
 
@@ -424,6 +449,7 @@ def get_amendment_plan(invoiced_item_id, idempotency_key, target_qty):
 			"result": logged.result,
 			"new_delivery_note": logged.new_delivery_note or None,
 			"custom_version": logged.custom_version if logged.new_delivery_note else None,
+			"wallet_below_zero": bool(logged.get("wallet_below_zero")),
 		}
 		if logged
 		else None
@@ -640,7 +666,7 @@ def _db_now():
 # ---- helpers -------------------------------------------------------------------------------------
 def _read_log(key, for_update=False):
 	rows = frappe.db.sql(
-		f"""select result, new_delivery_note, custom_version, grand_total
+		f"""select result, new_delivery_note, custom_version, grand_total, wallet_below_zero
 		from `tab{LOG_DOCTYPE}` where idempotency_key = %s {"for update" if for_update else ""}""",
 		key,
 		as_dict=True,
@@ -656,10 +682,14 @@ def _logged(log):
 		new_dn,
 		log.custom_version if new_dn else None,
 		log.grand_total,
+		wallet_below_zero=bool(log.get("wallet_below_zero")),
 	)
 
 
-def _ok(result, message, new_delivery_note=None, custom_version=None, grand_total=0.0):
+def _ok(
+	result, message, new_delivery_note=None, custom_version=None, grand_total=0.0, wallet_below_zero=False
+):
+	"""``wallet_below_zero``: the change left the customer's ERP wallet below zero (qc_wallet)."""
 	return {
 		"ok": True,
 		"code": None,
@@ -669,6 +699,7 @@ def _ok(result, message, new_delivery_note=None, custom_version=None, grand_tota
 		"new_delivery_note": new_delivery_note,
 		"custom_version": custom_version,
 		"grand_total": flt(grand_total),
+		"wallet_below_zero": wallet_below_zero,
 	}
 
 
@@ -683,6 +714,7 @@ def _refused(refusal):
 		"new_delivery_note": None,
 		"custom_version": None,
 		"grand_total": None,
+		"wallet_below_zero": None,
 	}
 
 
