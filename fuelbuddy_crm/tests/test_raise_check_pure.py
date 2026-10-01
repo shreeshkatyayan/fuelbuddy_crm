@@ -127,7 +127,21 @@ def _stubs(fake):
 	utils.flt = lambda value, precision=None: float(value or 0)
 	utils.get_system_timezone = lambda: "Asia/Dubai"
 	utils.strip_html = lambda text: text
+	utils.escape_html = lambda text: text
 	fake.utils = utils
+
+	# qty_correction imports qc_wallet (IDEV-3266 wallet overshoot), which imports assign_to. The
+	# raise check never reaches the wallet: a call here is a test failure.
+	def _no_assign(*args, **kwargs):
+		raise AssertionError("check_correction_raise reached qc_wallet's assign_to.add")
+
+	assign_to = types.ModuleType("frappe.desk.form.assign_to")
+	assign_to.add = _no_assign
+	form = _package("frappe.desk.form")
+	form.assign_to = assign_to
+	desk = _package("frappe.desk")
+	desk.form = form
+	fake.desk = desk
 
 	accounting_period = types.ModuleType("erpnext.accounts.doctype.accounting_period.accounting_period")
 	accounting_period.ClosedAccountingPeriod = type("ClosedAccountingPeriod", (Exception,), {})
@@ -141,6 +155,9 @@ def _stubs(fake):
 	return {
 		"frappe": fake,
 		"frappe.utils": utils,
+		"frappe.desk": desk,
+		"frappe.desk.form": form,
+		"frappe.desk.form.assign_to": assign_to,
 		"erpnext": _package("erpnext"),
 		"erpnext.accounts": _package("erpnext.accounts"),
 		"erpnext.accounts.doctype": _package("erpnext.accounts.doctype"),
