@@ -6,11 +6,14 @@
 See fuelbuddy_crm.lane_issue for what each piece is for. In order:
 
 0. A read-only check. The lane SLAs only work with Support Settings > Track Service Level Agreement
-   on, and ERPNext refuses to save an enabled Issue SLA while it is off. Turning it on also starts
-   every other enabled Issue SLA: a default one applies to every Issue, and one with no customer
-   scope to every Issue its condition matches. So where tracking is off and any enabled Issue SLA
-   other than the lane's exists, the patch stops here, changing nothing, and names them. A person
-   decides; bench migrate then runs the patch again.
+   on, and ERPNext refuses to save an enabled Issue SLA while it is off. The switch is site-wide:
+   turning it on also starts every other enabled SLA, of any document type (ERPNext applies SLAs on
+   every document's validate and only checks the switch, not the doctype). A default one applies
+   to every document of its type, and one with no customer scope to every document its condition
+   matches. Enabled non-Issue SLAs can sit dormant today, because ERPNext only refuses to save an
+   enabled Issue SLA while tracking is off. So where tracking is off and any enabled SLA other than
+   the lane's own exists, the patch stops here, changing nothing, and names them. A person decides;
+   bench migrate then runs the patch again.
 1. The columns, the add_app_op_key way: Issue and Delivery Note are large and written all day, and
    create_custom_fields would add the columns (and the unique key) in one ALTER that may rebuild the
    table, behind an uncapped metadata-lock wait. Instead each table gets its missing columns in one
@@ -23,8 +26,10 @@ See fuelbuddy_crm.lane_issue for what each piece is for. In order:
    its column. custom_held_changes is a Table field: its rows live in `tabLane Held Change`, which
    the model sync built before this post_model_sync patch.
 3. Issue Priority Medium (an ERPNext setup record, created only if missing), the four lane Issue
-   Types, the empty Holiday List "FuelBuddy Lane 24x7", tracking on, and one SLA per lane Issue
-   Type. A record that already exists is left as it is, so a time a person has tuned is kept.
+   Types, the empty Holiday List "FuelBuddy Lane 24x7", tracking on, Allow Resetting Service Level
+   Agreement on (erp-functions reopens a Closed or Resolved lane Issue with ERPNext's
+   reset_service_level_agreement, which refuses while it is off), and one SLA per lane Issue Type.
+   A record that already exists is left as it is, so a time a person has tuned is kept.
 
 Every step checks first, so the patch is safe to re-run: after a failure, bench migrate finishes
 what is left.
@@ -147,37 +152,43 @@ def execute():
 	_ensure_issue_types()
 	_ensure_holiday_list()
 	_enable_sla_tracking()
+	_enable_sla_reset()
 	_ensure_slas()
 
 
 # 0. The read-only check
 
 
-def other_enabled_issue_slas():
-	"""Enabled Issue SLAs that are not the lane's, which turning tracking on would start applying."""
+def other_enabled_slas():
+	"""Enabled SLAs of any document type, other than the lane's own Issue SLAs.
+
+	Support Settings > Track Service Level Agreement is one switch for every document type, so
+	turning it on starts all of these.
+	"""
 	lane_levels = set(lane.ISSUE_TYPES)
 	return [
 		sla.name
 		for sla in frappe.get_all(
 			"Service Level Agreement",
-			filters={"document_type": "Issue", "enabled": 1},
-			fields=["name", "service_level"],
+			filters={"enabled": 1},
+			fields=["name", "document_type", "service_level"],
 			order_by="name asc",
 		)
-		if sla.service_level not in lane_levels
+		if not (sla.document_type == "Issue" and sla.service_level in lane_levels)
 	]
 
 
 def _check_sla_tracking():
 	if frappe.db.get_single_value("Support Settings", "track_service_level_agreement"):
 		return
-	if others := other_enabled_issue_slas():
+	if others := other_enabled_slas():
 		frappe.throw(
 			"add_lane_issue_fields stopped before changing anything. The lane's Issue SLAs need Support "
-			"Settings > Track Service Level Agreement on, and it is off while these enabled Issue SLAs "
-			f"exist: {', '.join(others)}. Turning tracking on would start applying them to every Issue "
-			"they match, not only the lane's. A person decides: disable them, or turn tracking on by "
-			"hand knowing they will apply. Then run bench migrate again."
+			"Settings > Track Service Level Agreement on, and it is off while these enabled SLAs (any "
+			f"document type) exist: {', '.join(others)}. The switch is site-wide: turning it on would "
+			"start applying them to every document they match, not only the lane's Issues. A person "
+			"decides: disable them, or turn tracking on by hand knowing they will apply. Then run bench "
+			"migrate again."
 		)
 
 
@@ -305,6 +316,15 @@ def _ensure_holiday_list():
 def _enable_sla_tracking():
 	if not frappe.db.get_single_value("Support Settings", "track_service_level_agreement"):
 		frappe.db.set_single_value("Support Settings", "track_service_level_agreement", 1)
+
+
+def _enable_sla_reset():
+	# erp-functions upsertErpLaneIssue reopens a Closed or Resolved lane Issue with ERPNext's
+	# reset_service_level_agreement, so the reopened Issue gets fresh response and resolution times.
+	# ERPNext refuses that call while this setting is off. Reopening by status alone would keep the
+	# old sla_resolution_by, so an Issue reopened days later would already be overdue.
+	if not frappe.db.get_single_value("Support Settings", "allow_resetting_service_level_agreement"):
+		frappe.db.set_single_value("Support Settings", "allow_resetting_service_level_agreement", 1)
 
 
 def sla_doc(issue_type):

@@ -11,7 +11,7 @@ rolled back.
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import get_datetime, time_diff_in_seconds
+from frappe.utils import add_days, get_datetime, now_datetime, time_diff_in_seconds
 
 from fuelbuddy_crm import lane_issue as lane
 from fuelbuddy_crm.patches import add_lane_issue_fields as patch
@@ -70,6 +70,9 @@ class TestLaneIssueSetup(FrappeTestCase):
 
 	def test_issue_types_calendar_and_slas(self):
 		self.assertTrue(frappe.db.get_single_value("Support Settings", "track_service_level_agreement"))
+		self.assertTrue(
+			frappe.db.get_single_value("Support Settings", "allow_resetting_service_level_agreement")
+		)
 		self.assertEqual(frappe.db.count("Holiday", {"parent": lane.HOLIDAY_LIST}), 0)
 		for issue_type, (response_hours, resolution_hours) in lane.ISSUE_TYPES.items():
 			with self.subTest(issue_type=issue_type):
@@ -101,6 +104,43 @@ class TestLaneIssueSetup(FrappeTestCase):
 			[(row.app_row_kind, row.app_row_id) for row in issue.get(lane.HELD_CHANGES_FIELD)],
 			[("DELIVERY_NOTE", "dn-1"), ("MATERIAL_ISSUE", "task-1")],
 		)
+
+	def test_a_reopened_lane_issue_gets_fresh_sla_times_through_reset(self):
+		# upsertErpLaneIssue's reopen path: status back to Open, then ERPNext's
+		# reset_service_level_agreement, which refuses unless the patch turned resetting on.
+		from erpnext.support.doctype.service_level_agreement.service_level_agreement import (
+			reset_service_level_agreement,
+		)
+
+		issue = self._issue("Lane ERP Refusal", "lane-refusal-erp-dn-test-reset")
+		self.assertEqual(issue.service_level_agreement, "SLA-Issue-Lane ERP Refusal")
+		# The Issue was raised two days ago, so its 8 h resolution deadline is long past.
+		frappe.db.set_value(
+			"Issue",
+			issue.name,
+			{
+				"service_level_agreement_creation": add_days(now_datetime(), -2),
+				"opening_date": add_days(now_datetime(), -2),
+			},
+			update_modified=False,
+		)
+		issue.reload()
+		issue.status = "Resolved"
+		issue.save(ignore_permissions=True)
+		issue.reload()
+		issue.status = "Open"
+		issue.save(ignore_permissions=True)
+		issue.reload()
+		self.assertLess(get_datetime(issue.sla_resolution_by), now_datetime())
+
+		reset_service_level_agreement("Issue", issue.name, "lane test reopen", "Administrator")
+		issue.reload()
+
+		self.assertEqual(issue.service_level_agreement, "SLA-Issue-Lane ERP Refusal")
+		start = get_datetime(issue.service_level_agreement_creation)
+		self.assertLess(abs(time_diff_in_seconds(now_datetime(), start)), 120)
+		self.assertAlmostEqual(time_diff_in_seconds(issue.sla_resolution_by, start), 8 * HOUR, delta=2)
+		self.assertGreater(get_datetime(issue.sla_resolution_by), now_datetime())
 
 	def test_an_issue_of_another_type_takes_no_lane_sla(self):
 		issue = self._issue(None, None)

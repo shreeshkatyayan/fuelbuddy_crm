@@ -7,7 +7,7 @@ Runs as plain Python from the app root (``python3 -m unittest discover -s fuelbu
 "test_*_pure.py"``) and under ``bench run-tests``. The patch is loaded against a small fake frappe
 that records the SQL it sends and the records it inserts; it is not MariaDB or ERPNext. The fake
 keeps the one ERPNext rule the patch's order depends on: an enabled Issue SLA can't be saved while
-SLA tracking is off. test_lane_issue_fields checks the rest on a site.
+SLA tracking is off (an enabled SLA on another document type can, as in ERPNext). test_lane_issue_fields checks the rest on a site.
 """
 
 import contextlib
@@ -38,6 +38,8 @@ ISSUE_COLUMNS = (
 	"custom_held_count",
 )
 LANE_TYPES = ("Lane Approval Pending", "Lane ERP Refusal", "Lane Past Target", "Lane Check Mismatch")
+TRACKING = ("Support Settings", "track_service_level_agreement")
+RESETTING = ("Support Settings", "allow_resetting_service_level_agreement")
 SERVER_LOCK_WAIT = 86400
 _SEQ = itertools.count()
 
@@ -66,10 +68,13 @@ class Table:
 class Records:
 	"""Just enough of ERPNext's records for the patch: exists, get_all, insert, singles."""
 
-	def __init__(self, site, tracking=False, existing=None):
+	def __init__(self, site, tracking=False, resetting=False, existing=None):
 		self.site = site
 		self.docs = {}  # doctype -> {name: doc dict}
-		self.singles = {("Support Settings", "track_service_level_agreement"): int(tracking)}
+		self.singles = {
+			("Support Settings", "track_service_level_agreement"): int(tracking),
+			("Support Settings", "allow_resetting_service_level_agreement"): int(resetting),
+		}
 		self.inserted = []  # (doctype, name)
 		self.single_writes = []
 		for doctype, doc in existing or ():
@@ -186,9 +191,11 @@ class FakeDoc:
 class Site:
 	"""A fake frappe and the patch loaded against it."""
 
-	def __init__(self, tables=None, db_type="mariadb", fail_on=None, tracking=False, existing=None):
+	def __init__(
+		self, tables=None, db_type="mariadb", fail_on=None, tracking=False, resetting=False, existing=None
+	):
 		self.tables = tables if tables is not None else {ISSUE: Table(), DN: Table()}
-		self.records = Records(self, tracking=tracking, existing=existing)
+		self.records = Records(self, tracking=tracking, resetting=resetting, existing=existing)
 		self.db = FakeDB(self.tables, self.records, db_type=db_type, fail_on=fail_on)
 		self.frappe = types.ModuleType("frappe")
 		self.frappe.db = self.db
@@ -490,7 +497,8 @@ class TestIssueTypesAndSlas(unittest.TestCase):
 		holiday = site.docs("Holiday List")["FuelBuddy Lane 24x7"]
 		self.assertEqual(holiday["holidays"], [])
 		self.assertLess(holiday["from_date"], holiday["to_date"])
-		self.assertEqual(site.records.singles[("Support Settings", "track_service_level_agreement")], 1)
+		self.assertEqual(site.records.singles[TRACKING], 1)
+		self.assertEqual(site.records.singles[RESETTING], 1)
 
 		slas = site.docs("Service Level Agreement")
 		self.assertEqual(sorted(slas), sorted(f"SLA-Issue-{t}" for t in LANE_TYPES))
@@ -539,9 +547,18 @@ class TestIssueTypesAndSlas(unittest.TestCase):
 	def test_tracking_is_on_before_the_first_sla(self):
 		# The fake refuses an enabled Issue SLA while tracking is off, as ERPNext does.
 		site = Site(tracking=False).run()
-		self.assertEqual(
-			site.records.single_writes, [("Support Settings", "track_service_level_agreement", 1)]
-		)
+		self.assertEqual(site.records.single_writes, [(*TRACKING, 1), (*RESETTING, 1)])
+
+	def test_turns_on_sla_resetting_for_the_reopen_path(self):
+		# erp-functions reopens a Closed or Resolved lane Issue with reset_service_level_agreement,
+		# which ERPNext refuses while Allow Resetting Service Level Agreement is off.
+		site = Site(tracking=True).run()
+		self.assertEqual(site.records.single_writes, [(*RESETTING, 1)])
+		self.assertEqual(site.records.singles[RESETTING], 1)
+
+	def test_leaves_sla_resetting_alone_when_already_on(self):
+		site = Site(tracking=True, resetting=True).run()
+		self.assertEqual(site.records.single_writes, [])
 
 	def test_a_second_run_changes_nothing(self):
 		site = Site().run()
@@ -565,6 +582,7 @@ class TestIssueTypesAndSlas(unittest.TestCase):
 		}
 		site = Site(
 			tracking=True,
+			resetting=True,
 			existing=[
 				("Issue Type", {"name": "Lane ERP Refusal", "description": "kept"}),
 				("Issue Priority", {"name": "Medium"}),
@@ -578,43 +596,92 @@ class TestIssueTypesAndSlas(unittest.TestCase):
 		self.assertEqual(site.docs("Service Level Agreement")["SLA-Issue-Lane Past Target"], tuned)
 		self.assertNotIn(("Issue Priority", "Medium"), site.records.inserted)
 		self.assertEqual(len(site.docs("Service Level Agreement")), 4)
-		self.assertEqual(site.records.single_writes, [])  # tracking was already on
+		self.assertEqual(site.records.single_writes, [])  # tracking and resetting were already on
 
 
 class TestSlaTrackingGate(unittest.TestCase):
+	def assert_stopped_before_any_change(self, site, *names):
+		with self.assertRaises(ValidationError) as caught:
+			site.run()
+
+		for name in names:
+			self.assertIn(name, str(caught.exception))
+		self.assertIn("stopped before changing anything", str(caught.exception))
+		self.assertEqual(site.db.ddl, [])
+		self.assertEqual(site.created, [])
+		self.assertEqual(site.records.inserted, [])
+		self.assertEqual(site.records.single_writes, [])
+		self.assertEqual(site.records.singles[TRACKING], 0)
+
 	def test_stops_before_any_change_when_tracking_would_start_another_sla(self):
 		for default in (1, 0):
 			with self.subTest(default=default):
 				site = Site(tracking=False, existing=[other_sla("Standard", default=default)])
+				self.assert_stopped_before_any_change(site, "SLA-Issue-Standard")
 
-				with self.assertRaises(ValidationError) as caught:
-					site.run()
+	def test_an_enabled_sla_on_another_doctype_stops_it_too(self):
+		# The tracking switch is site-wide: ERPNext applies SLAs on every document's validate and
+		# checks only the switch, so turning it on would start a dormant Warranty Claim SLA.
+		for default in (1, 0):
+			with self.subTest(default=default):
+				site = Site(
+					tracking=False,
+					existing=[other_sla("Warranty", document_type="Warranty Claim", default=default)],
+				)
+				self.assert_stopped_before_any_change(site, "SLA-Warranty Claim-Warranty")
 
-				self.assertIn("SLA-Issue-Standard", str(caught.exception))
-				self.assertIn("stopped before changing anything", str(caught.exception))
-				self.assertEqual(site.db.ddl, [])
-				self.assertEqual(site.created, [])
-				self.assertEqual(site.records.inserted, [])
-				self.assertEqual(site.records.single_writes, [])
-
-	def test_goes_ahead_when_tracking_is_already_on(self):
-		site = Site(tracking=True, existing=[other_sla("Standard", default=1)]).run()
-
-		self.assertEqual(len(site.docs("Service Level Agreement")), 5)
-		self.assertEqual(site.records.single_writes, [])
-
-	def test_disabled_slas_and_other_doctypes_do_not_stop_it(self):
+	def test_a_lane_named_service_level_on_another_doctype_is_not_the_lanes(self):
 		site = Site(
 			tracking=False,
-			existing=[other_sla("Old", enabled=0), other_sla("Warranty", document_type="Warranty Claim")],
+			existing=[other_sla("Lane Past Target", document_type="Warranty Claim")],
+		)
+		self.assert_stopped_before_any_change(site, "SLA-Warranty Claim-Lane Past Target")
+
+	def test_names_every_sla_that_stops_it(self):
+		site = Site(
+			tracking=False,
+			existing=[
+				other_sla("Standard"),
+				other_sla("Warranty", document_type="Warranty Claim"),
+				other_sla("Old", enabled=0),
+			],
+		)
+		with self.assertRaises(ValidationError) as caught:
+			site.run()
+		message = str(caught.exception)
+		self.assertIn("SLA-Issue-Standard, SLA-Warranty Claim-Warranty", message)
+		self.assertNotIn("SLA-Issue-Old", message)
+
+	def test_goes_ahead_when_tracking_is_already_on(self):
+		site = Site(
+			tracking=True,
+			resetting=True,
+			existing=[
+				other_sla("Standard", default=1),
+				other_sla("Warranty", document_type="Warranty Claim"),
+			],
 		).run()
 
-		self.assertEqual(site.records.singles[("Support Settings", "track_service_level_agreement")], 1)
 		self.assertEqual(len(site.docs("Service Level Agreement")), 6)
+		self.assertEqual(site.records.single_writes, [])
+
+	def test_disabled_slas_do_not_stop_it(self):
+		site = Site(
+			tracking=False,
+			existing=[
+				other_sla("Old", enabled=0),
+				other_sla("Old Default", enabled=0, default=1),
+				other_sla("Warranty", enabled=0, document_type="Warranty Claim"),
+				other_sla("Warranty Default", enabled=0, document_type="Warranty Claim", default=1),
+			],
+		).run()
+
+		self.assertEqual(site.records.singles[TRACKING], 1)
+		self.assertEqual(len(site.docs("Service Level Agreement")), 8)
 
 	def test_the_lanes_own_slas_do_not_stop_a_re_run(self):
 		site = Site().run()
-		site.records.singles[("Support Settings", "track_service_level_agreement")] = 0
+		site.records.singles[TRACKING] = 0
 		site.patch._check_sla_tracking()  # only the lane's SLAs are enabled: no stop
 
 
