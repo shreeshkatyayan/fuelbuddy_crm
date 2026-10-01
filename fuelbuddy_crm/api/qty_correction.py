@@ -11,6 +11,19 @@ fixed strings, never parsed from messages.
 log for this episode, the live Delivery Note and whether it is already at target, and the ERP
 feasibility checks: ``SO_CLOSED``, ``PERIOD_CLOSED``, ``INVOICED``, ``DUPLICATE_LIVE_DN``.
 
+``check_correction_raise(invoiced_item_id)`` — read-only, asked before a ticket is raised
+(erp-functions ``checkCorrectionRaise``, from the ops dashboard). Owner decisions: a delivery an
+invoice already covers, even a draft invoice, is refused at raise and the refusal names the
+invoice (30 Sep); so is a Delivery Note with a return against it (29 Sep). Every live Delivery
+Note of the invoiced item is checked:
+
+    INVOICED     a live, non-return Sales Invoice covers it, by the amend's own INVOICED rule
+                 (dn_invoice_link.covering_invoices), so raise and amend never disagree
+    HAS_RETURN   a submitted return Delivery Note is against it
+    ok, no_dn    no live Delivery Note: nothing in ERP to refuse on
+
+INVOICED wins when both apply; the invoice and return names come back either way.
+
 ``amend_delivery_note(delivery_note, target_qty, idempotency_key, not_after)``:
 
     Draft      qty updated in place; deleted when the target is 0
@@ -477,6 +490,73 @@ def _plan(
 		"live_dn_qty_litres": live_dn_qty_litres,
 		"dn_at_target": dn_at_target,
 		"docstatus": docstatus,
+	}
+
+
+# ---- raise check ---------------------------------------------------------------------------------
+@frappe.whitelist()
+def check_correction_raise(invoiced_item_id):
+	"""Read-only: may a quantity correction be raised on this invoiced item? See the module
+	docstring."""
+	try:
+		iid = _required(invoiced_item_id, "invoiced_item_id")
+		if not frappe.has_permission("Delivery Note", "read"):
+			raise Refusal("ERP_VALIDATION", _("Not permitted to read Delivery Notes"))
+	except Refusal as refusal:
+		return _raise_check(refusal)
+
+	live = frappe.get_all(
+		"Delivery Note",
+		filters={"custom_invoiced_item_id": iid, "docstatus": ["<", 2], "is_return": 0},
+		fields=["name"],
+		order_by="creation asc",
+		pluck="name",
+	)
+	if not live:
+		return _raise_check(no_dn=True)
+
+	covered = {name: covering_invoices(frappe.get_doc("Delivery Note", name)) for name in live}
+	invoices = sorted(set().union(*covered.values()))
+	returns = frappe.get_all(
+		"Delivery Note",
+		filters={"return_against": ["in", live], "is_return": 1, "docstatus": 1},
+		fields=["name", "return_against"],
+	)
+	facts = {"delivery_notes": live, "invoices": invoices, "returns": sorted({r.name for r in returns})}
+	if invoices:
+		return _raise_check(
+			Refusal(
+				"INVOICED",
+				_("Delivery Note {0} is covered by Sales Invoice {1}").format(
+					", ".join(name for name in live if covered[name]), ", ".join(invoices)
+				),
+			),
+			**facts,
+		)
+	if returns:
+		return _raise_check(
+			Refusal(
+				"HAS_RETURN",
+				_("Delivery Note {0} has return {1}").format(
+					", ".join(sorted({r.return_against for r in returns})), ", ".join(facts["returns"])
+				),
+			),
+			**facts,
+		)
+	return _raise_check(**facts)
+
+
+def _raise_check(refusal=None, no_dn=False, delivery_notes=(), invoices=(), returns=()):
+	if refusal:
+		frappe.clear_messages()
+	return {
+		"ok": refusal is None,
+		"code": refusal.code if refusal else None,
+		"message": refusal.message if refusal else None,
+		"no_dn": no_dn,
+		"delivery_notes": list(delivery_notes),
+		"invoices": list(invoices),
+		"returns": list(returns),
 	}
 
 
