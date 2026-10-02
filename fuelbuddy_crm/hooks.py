@@ -346,7 +346,12 @@ doc_events = {
             "fuelbuddy_crm.dn_validation.set_live_invoiced_item_key",
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
-        "before_insert": "fuelbuddy_crm.dn_versioning.set_amended_version",
+        # drop_copied_idempotency_key: ERPNext's Amend copies no_copy fields, so a UI amendment of a
+        # quantity-corrected DN would inherit its unique custom_qc_idempotency_key (IDEV-3266).
+        "before_insert": [
+            "fuelbuddy_crm.dn_versioning.set_amended_version",
+            "fuelbuddy_crm.dn_versioning.drop_copied_idempotency_key",
+        ],
         # Keep Sales Order Item.custom_delivery_note_qty_in_draft (which the allocator
         # subtracts from the SO headroom) in step with the live draft DNs -- including
         # RELEASING it on cancel/delete, which the old Server Script never did.
@@ -389,7 +394,14 @@ doc_events = {
         # IDEV-3129: Force Majeure is decided per delivery and lands on the invoice.
         # Manual invoices are re-rated here per DN-linked line; auto-invoicing splits
         # its own lines in _make_draft_invoice.
-        "validate": "fuelbuddy_crm.force_majeure.apply_force_majeure",
+        # invoice_hold first (IDEV-3266): an invoice that would cover a Delivery Note under
+        # quantity correction is refused (it waits until the correction ends); so is an
+        # after-submit edit of the DN window that makes it cover one.
+        "validate": [
+            "fuelbuddy_crm.invoice_hold.refuse_held_invoice",
+            "fuelbuddy_crm.force_majeure.apply_force_majeure",
+        ],
+        "before_update_after_submit": "fuelbuddy_crm.invoice_hold.refuse_newly_held_after_submit",
         # Manually punched invoices get the same deal discount as scheduler ones;
         # before_save runs after the live DN-qty-rewrite Server Script (validate),
         # before_submit re-applies against the final submitted quantities.
@@ -401,6 +413,14 @@ doc_events = {
         "on_update_after_submit": "fuelbuddy_crm.dn_invoice_link.allocate_sales_invoice",
         "on_cancel": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
         "on_trash": "fuelbuddy_crm.dn_invoice_link.clear_sales_invoice",
+    },
+    # IDEV-3201: depot posts carry the app's op key (unique, kept when cancelled). Amending copies
+    # it, so the amendment drops it before insert rather than collide with the original.
+    "Purchase Receipt": {
+        "before_insert": "fuelbuddy_crm.op_key.clear_on_amend",
+    },
+    "Stock Entry": {
+        "before_insert": "fuelbuddy_crm.op_key.clear_on_amend",
     },
 }
 

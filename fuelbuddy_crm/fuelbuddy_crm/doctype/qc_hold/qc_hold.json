@@ -1,0 +1,130 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:invoiced_item_id",
+ "creation": "2026-09-30 00:00:00.000000",
+ "description": "Quantity correction (IDEV-3266): while a correction ticket is open on a delivery, the invoice that would bill that delivery waits. One row per invoiced item (the Delivery Note stamp custom_invoiced_item_id), written only by fuelbuddy_crm.api.qc_hold.open_hold / close_hold for the QuantityCorrectionWorkflow. An Open hold stops a desk Sales Invoice whose Sales Order lines and DN window cover the delivery, and makes the 12:00 auto-invoicing job defer that Sales Order. A hold lapses on its own at Lapses At (the ticket's apply cut-off). Rows are never deleted: a closed hold stays as the record of the last episode that touched the item.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "invoiced_item_id",
+  "episode_key",
+  "status",
+  "column_break_hold",
+  "opened_at",
+  "expires_at",
+  "closed_at",
+  "close_reason"
+ ],
+ "fields": [
+  {
+   "description": "The app invoiced item (quantity_correction_tickets.invoiced_item_id). A Delivery Note is held when its custom_invoiced_item_id equals it.",
+   "fieldname": "invoiced_item_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Invoiced Item ID",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "description": "The correction ticket episode (quantity_correction_tickets.episode_key) that last opened or closed this hold.",
+   "fieldname": "episode_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Ticket Episode",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nClosed",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_hold",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "When this episode opened the hold, UTC.",
+   "fieldname": "opened_at",
+   "fieldtype": "Datetime",
+   "label": "Opened At (UTC)",
+   "read_only": 1
+  },
+  {
+   "description": "The ticket's apply cut-off, UTC. An Open hold stops holding invoices from this moment, even if it was never closed.",
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Lapses At (UTC)",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "When the ticket's end closed the hold, UTC.",
+   "fieldname": "closed_at",
+   "fieldtype": "Datetime",
+   "label": "Closed At (UTC)",
+   "read_only": 1
+  },
+  {
+   "description": "How the ticket episode ended (APPLIED, FAILED, REJECTED, TIMED_OUT, NOTHING_TO_DO or SUPERSEDED).",
+   "fieldname": "close_reason",
+   "fieldtype": "Data",
+   "label": "Close Reason",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fuelbuddy CRM",
+ "name": "QC Hold",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts User",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Stock Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "invoiced_item_id"
+}
