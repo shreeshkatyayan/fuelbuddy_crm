@@ -19,3 +19,4 @@ fuelbuddy_crm.patches.add_dn_sales_invoice_link
 fuelbuddy_crm.patches.add_app_op_key
 fuelbuddy_crm.patches.add_dn_qc_idempotency_key
 fuelbuddy_crm.patches.add_dn_live_invoiced_item_key
+fuelbuddy_crm.patches.add_lane_issue_fields
