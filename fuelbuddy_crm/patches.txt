@@ -3,6 +3,7 @@
 # Read docs to understand patches: https://frappeframework.com/docs/v14/user/en/database-migrations
 
 fuelbuddy_crm.patches.create_force_majeure_roles
+fuelbuddy_crm.patches.precreate_dn_key_columns
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
@@ -16,4 +17,6 @@ fuelbuddy_crm.patches.remove_auto_pick_dn_server_script
 fuelbuddy_crm.patches.recompute_cloned_so_progress
 fuelbuddy_crm.patches.add_dn_sales_invoice_link
 fuelbuddy_crm.patches.add_app_op_key
+fuelbuddy_crm.patches.add_dn_qc_idempotency_key
+fuelbuddy_crm.patches.add_dn_live_invoiced_item_key
 fuelbuddy_crm.patches.add_lane_issue_fields
