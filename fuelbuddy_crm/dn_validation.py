@@ -13,15 +13,25 @@ Delivery Note (docstatus < 2) may exist per custom_invoiced_item_id. Cancelled D
 (docstatus 2) don't count, so versioning is allowed; a genuine duplicate — two live
 DNs for one invoiced_item — is blocked.
 
-Note: like any validate-time check-then-act, this catches sequential/re-delivered
-duplicates, not a truly simultaneous double-insert (no row lock). The out-of-band
-punch path is effectively serialized, so that residual race is negligible; add a
-row lock only if concurrent duplicate creates are ever observed.
+enforce_single_active_dn is a plain read at validate time, which two concurrent inserts
+both pass: Frappe takes the naming-series row lock before validate, so the second insert
+waits for the first to commit, then validates against the snapshot its transaction opened
+before that commit (REPEATABLE READ) and does not see the first DN. That produced 607 twin
+drafts in production between 1 Jul and 26 Sep 2026 (IDEV-3269). The database therefore holds
+the invariant too: custom_live_invoiced_item_id (set_live_invoiced_item_key) carries
+custom_invoiced_item_id only while the DN is live and is uniquely indexed, so the second
+live DN is refused by MariaDB. enforce_single_active_dn stays for the clear message on a
+sequential duplicate and for DNs made before the key existed (their key is NULL).
 """
 
 import frappe
 from frappe import _
 from frappe.utils import flt
+
+STAMP_FIELD = "custom_invoiced_item_id"
+# Unique; STAMP_FIELD while the DN is live (docstatus < 2, not a return), NULL otherwise.
+# Created by patches/add_dn_live_invoiced_item_key.py.
+LIVE_KEY_FIELD = "custom_live_invoiced_item_id"
 
 
 def enforce_single_active_dn(doc, method=None):
@@ -51,6 +61,26 @@ def enforce_single_active_dn(doc, method=None):
 			),
 			title=_("Duplicate Delivery Note"),
 		)
+
+
+def set_live_invoiced_item_key(doc, method=None):
+	"""Delivery Note validate / before_cancel -> LIVE_KEY_FIELD = STAMP_FIELD while the DN is
+	live, else None.
+
+	validate covers insert, draft saves and submit (docstatus 0 or 1: keyed); before_cancel
+	runs after Frappe set docstatus 2 and before it writes the row, so a cancel frees the key
+	in the same UPDATE, and a versioned amendment inserted afterwards -- even in the same
+	transaction -- takes it. A deleted draft takes its key with it. Returns are never keyed.
+	Recomputed every time, so a value copied by Amend / copy_doc (no_copy is ignored there)
+	never survives.
+
+	Not run for a DN saved, submitted or cancelled with flags.ignore_validate: Frappe skips
+	validate and before_cancel then. Such a DN keeps the key it had, so a cancel done that way
+	leaves the item's next amendment refused until the key is cleared (it fails safe). No
+	Delivery Note write in the FuelBuddy ERP apps sets ignore_validate."""
+	iid = doc.get(STAMP_FIELD)
+	live = iid and doc.docstatus < 2 and not doc.get("is_return")
+	doc.set(LIVE_KEY_FIELD, iid if live else None)
 
 
 def _so_details(doc):

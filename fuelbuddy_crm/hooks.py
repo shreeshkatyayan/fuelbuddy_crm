@@ -335,11 +335,15 @@ doc_events = {
         # (versioned amendments reuse it), so enforce "one live DN per invoiced
         # item" in code; and amendment versioning — custom_version is no_copy,
         # so a UI amend resets it to "1" unless recomputed as parent+1.
+        # set_live_invoiced_item_key backs the dedup in the database: the unique
+        # custom_live_invoiced_item_id, which two concurrent inserts cannot both pass
+        # (the validate-time read can; IDEV-3269). It runs on before_cancel too.
         # enforce_so_headroom is the authoritative over-delivery gate: ERPNext's own
         # Stock Settings "over_delivery_receipt_allowance" is 1000 (i.e. 1000% tolerated),
         # and the allocator's headroom check is client-side and racy.
         "validate": [
             "fuelbuddy_crm.dn_validation.enforce_single_active_dn",
+            "fuelbuddy_crm.dn_validation.set_live_invoiced_item_key",
             "fuelbuddy_crm.dn_validation.enforce_so_headroom",
         ],
         # drop_copied_idempotency_key: ERPNext's Amend copies no_copy fields, so a UI amendment of a
@@ -358,6 +362,8 @@ doc_events = {
             "fuelbuddy_crm.dn_invoice_link.on_delivery_note_update",
         ],
         "on_submit": "fuelbuddy_crm.dn_validation.sync_draft_reservation",
+        # A cancelled DN gives up custom_live_invoiced_item_id, so its amendment can take it.
+        "before_cancel": "fuelbuddy_crm.dn_validation.set_live_invoiced_item_key",
         "on_cancel": [
             "fuelbuddy_crm.dn_validation.sync_draft_reservation",
             "fuelbuddy_crm.dn_invoice_link.on_delivery_note_cancel",

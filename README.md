@@ -28,6 +28,10 @@ Pre-commit is configured to use the following tools for checking and formatting 
 - prettier
 - pyupgrade
 
+### Operations
+
+- [Delivery Note key columns: safe setup](docs/dn-key-columns.md): the online step that adds the Delivery Note key columns, how to run it before `bench migrate`, and what to watch.
+
 ### License
 
 mit
