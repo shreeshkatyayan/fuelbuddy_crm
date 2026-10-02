@@ -177,6 +177,41 @@ def on_delivery_note_trash(doc, method=None):
 	reallocate_for_delivery_note(doc, exclude_self=True)
 
 
+def window_invoices(so_details, posting_date):
+	"""Live, non-return Sales Invoices billing one of these SO lines whose DN window covers
+	``posting_date``."""
+	if not so_details:
+		return []
+	return frappe.db.sql_list(
+		"""select distinct si.name from `tabSales Invoice` si
+		join `tabSales Invoice Item` sii on sii.parent = si.name
+		where sii.so_detail in %(so)s and si.docstatus < 2 and si.is_return = 0
+		and (si.custom_dn_from_date is null or si.custom_dn_from_date <= %(d)s)
+		and (si.custom_dn_to_date is null or si.custom_dn_to_date >= %(d)s)""",
+		{"so": list(so_details), "d": posting_date},
+	)
+
+
+def covering_invoices(doc):
+	"""The invoices a change to this DN affects: the one that took it and, for a submitted DN,
+	every invoice whose window covers it. Empty when the DN cannot affect any link.
+
+	Also the quantity-correction INVOICED test (fuelbuddy_crm.api.qty_correction), at raise
+	(check_correction_raise) and at amend, so none of them can disagree about whether a DN is
+	invoiced."""
+	so_details = [i.so_detail for i in doc.items if i.so_detail]
+	if not so_details:
+		return set()
+	invoices = set()
+	own = frappe.db.get_value("Delivery Note", doc.name, LINK_FIELD)
+	if own:
+		invoices.add(own)
+	if not invoices and doc.docstatus != 1:
+		return invoices  # an unsubmitted DN no invoice ever took cannot affect any link
+	invoices.update(window_invoices(so_details, doc.posting_date))
+	return invoices
+
+
 def reallocate_for_delivery_note(doc, exclude_self=False):
 	"""Re-run the invoice that took this DN and every invoice whose window now covers it."""
 	if frappe.flags.in_install or frappe.flags.in_migrate:
@@ -186,29 +221,11 @@ def reallocate_for_delivery_note(doc, exclude_self=False):
 	# call backfill() for the affected months.
 	if getattr(frappe.flags, "fb_skip_billing_status", False):
 		return
-	so_details = [i.so_detail for i in doc.items if i.so_detail]
-	if not so_details:
-		return
-	invoices = set()
-	own = frappe.db.get_value("Delivery Note", doc.name, LINK_FIELD)
-	if own:
-		invoices.add(own)
-	if not invoices and doc.docstatus != 1:
-		return  # an unsubmitted DN no invoice ever took cannot affect any link
-	if exclude_self:
-		_clear(None, dn_names=[doc.name])
-	invoices.update(
-		frappe.db.sql_list(
-			"""select distinct si.name from `tabSales Invoice` si
-			join `tabSales Invoice Item` sii on sii.parent = si.name
-			where sii.so_detail in %(so)s and si.docstatus < 2 and si.is_return = 0
-			and (si.custom_dn_from_date is null or si.custom_dn_from_date <= %(d)s)
-			and (si.custom_dn_to_date is null or si.custom_dn_to_date >= %(d)s)""",
-			{"so": so_details, "d": doc.posting_date},
-		)
-	)
+	invoices = covering_invoices(doc)
 	if not invoices:
 		return
+	if exclude_self:
+		_clear(None, dn_names=[doc.name])
 	ordered = frappe.get_all(
 		"Sales Invoice", filters={"name": ["in", list(invoices)]}, order_by="posting_date asc, creation asc", pluck="name"
 	)
