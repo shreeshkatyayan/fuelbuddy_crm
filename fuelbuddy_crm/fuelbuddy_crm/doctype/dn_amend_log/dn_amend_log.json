@@ -1,0 +1,129 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:idempotency_key",
+ "creation": "2026-09-26 00:00:00.000000",
+ "description": "Quantity correction (IDEV-3266): the result of one Delivery Note amendment, keyed by the correction episode. Written by fuelbuddy_crm.api.qty_correction.amend_delivery_note in the same transaction as the change; retries and the workflow's plan step read it back instead of amending twice.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "idempotency_key",
+  "delivery_note",
+  "result",
+  "column_break_amend",
+  "new_delivery_note",
+  "custom_version",
+  "grand_total",
+  "target_qty",
+  "wallet_below_zero"
+ ],
+ "fields": [
+  {
+   "description": "The correction episode key (quantity_correction_tickets.episode_key).",
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Idempotency Key",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "description": "The Delivery Note the amend was asked to change.",
+   "fieldname": "delivery_note",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Delivery Note",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "result",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Result",
+   "options": "AMENDED\nCANCELLED\nDRAFT_UPDATED\nDRAFT_DELETED",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_amend",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The live Delivery Note after the change: the amendment, or the updated draft. Empty when cancelled or deleted.",
+   "fieldname": "new_delivery_note",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "New Delivery Note",
+   "read_only": 1
+  },
+  {
+   "fieldname": "custom_version",
+   "fieldtype": "Int",
+   "label": "Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "grand_total",
+   "fieldtype": "Currency",
+   "label": "Grand Total",
+   "read_only": 1
+  },
+  {
+   "description": "Litres the Delivery Note was amended to.",
+   "fieldname": "target_qty",
+   "fieldtype": "Float",
+   "label": "Target Qty (L)",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "The change left the customer's ERP wallet below zero; the overshoot Issue was raised with it (fuelbuddy_crm.qc_wallet).",
+   "fieldname": "wallet_below_zero",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Wallet Below Zero",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fuelbuddy CRM",
+ "name": "DN Amend Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Stock Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  },
+  {
+   "role": "Accounts Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "delivery_note"
+}

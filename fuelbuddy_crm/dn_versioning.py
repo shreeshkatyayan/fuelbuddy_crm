@@ -29,3 +29,20 @@ def set_amended_version(doc, method=None):
 	match = re.match(r"\d+", str(parent_version or ""))
 	prev = int(match.group()) if match else 1
 	doc.custom_version = str(prev + 1)
+
+
+# ---- quantity-correction idempotency key (IDEV-3266) ---------------------------------------------
+# The episode key amend_delivery_note (fuelbuddy_crm.api.qty_correction) puts on the live Delivery
+# Note it produces. Lives here, beside set_amended_version, because the hook below is a Delivery
+# Note before_insert hook like it; api/qty_correction imports the field name from here.
+QC_IDEMPOTENCY_KEY_FIELD = "custom_qc_idempotency_key"
+
+
+def drop_copied_idempotency_key(doc, method=None):
+	"""Delivery Note before_insert: only amend_delivery_note may put an episode key on a new
+	Delivery Note. ERPNext's Amend copies no_copy fields too, so a UI amendment of a corrected
+	Delivery Note would otherwise inherit its key and fail the unique index."""
+	if doc.get(QC_IDEMPOTENCY_KEY_FIELD) and doc.flags.get("qc_idempotency_key") != doc.get(
+		QC_IDEMPOTENCY_KEY_FIELD
+	):
+		doc.set(QC_IDEMPOTENCY_KEY_FIELD, None)
